@@ -1,4 +1,6 @@
 import ast
+
+SUPPORTED_LANGUAGES = {"python"}
 import re
 from .utils import get_python_files, parse_file
 

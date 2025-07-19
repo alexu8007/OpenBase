@@ -1,4 +1,6 @@
 import subprocess
+
+SUPPORTED_LANGUAGES = {"python"}
 import json
 import os
 from .utils import get_python_files

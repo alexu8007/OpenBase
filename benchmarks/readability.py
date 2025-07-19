@@ -1,4 +1,7 @@
 from radon.visitors import ComplexityVisitor
+
+# Readability analysis is currently Python-specific
+SUPPORTED_LANGUAGES = {"python"}
 from pycodestyle import StyleGuide
 from .utils import get_python_files
 

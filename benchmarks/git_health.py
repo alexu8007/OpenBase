@@ -1,4 +1,6 @@
 from pathlib import Path
+
+SUPPORTED_LANGUAGES = {"any"}
 from datetime import datetime, timedelta
 from collections import Counter
 from typing import List

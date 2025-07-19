@@ -1,4 +1,6 @@
 import subprocess
+
+SUPPORTED_LANGUAGES = {"python"}
 import json
 import os
 import time

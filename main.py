@@ -62,6 +62,16 @@ def _load_benchmarks():
 
 BENCHMARK_FUNCS = _load_benchmarks()
 
+# Map of benchmark name -> supported languages set (lowercase)
+BENCHMARK_LANGS = {}
+for mod in BUILT_IN_MODULES:
+    raw_name = mod.__name__.split(".")[-1]
+    display_name = raw_name.replace("_", " ").title().replace(" ", "")
+    langs = getattr(mod, "SUPPORTED_LANGUAGES", {"python"})  # default python if not specified
+    if langs == "any":
+        langs = {"any"}
+    BENCHMARK_LANGS[display_name] = {lang.lower() for lang in langs}
+
 @app.command()
 def compare(
     codebase1: Path = typer.Option(..., "--codebase1", "-c1", help="Path to the first codebase."),
@@ -100,12 +110,25 @@ def compare(
     console.print(Align.center(f"Comparing [magenta]{codebase1.name}[/magenta] vs [green]{codebase2.name}[/green]"))
     console.print()
 
-    # Prepare benchmarks to run
-    benchmarks_to_run = [(name, func) for name, func in BENCHMARK_FUNCS.items() if name not in skip_set]
-    
+    # Detect languages present in each codebase
+    from benchmarks.language_utils import detect_languages
+    langs1 = detect_languages(codebase1)
+    langs2 = detect_languages(codebase2)
+
+    # Prepare benchmarks to run, filtering by language support
+    benchmarks_to_run = []
+    for name, func in BENCHMARK_FUNCS.items():
+        if name in skip_set:
+            continue
+        supported = BENCHMARK_LANGS.get(name, {"any"})
+        if "any" in supported or (langs1 & supported) or (langs2 & supported):
+            benchmarks_to_run.append((name, func))
+
     raw_scores1, raw_scores2 = {}, {}
     details1, details2 = {}, {}
     raw_metrics1, raw_metrics2 = {}, {}
+    # Store full result objects so we don't need to re-run benchmarks later
+    result_objects1, result_objects2 = {}, {}
 
     # Run benchmarks with progress tracking
     with Progress(
@@ -143,6 +166,10 @@ def compare(
                 score2, detail2 = result2
                 raw_metrics2[name] = {}
             
+            # cache result objects
+            result_objects1[name] = result1
+            result_objects2[name] = result2
+
             raw_scores1[name] = score1
             raw_scores2[name] = score2
 
@@ -179,7 +206,7 @@ def compare(
     # Apply weights and calculate totals
     total_score1, total_score2 = 0, 0
     for name in benchmarks_to_run:
-        name = name[0]  # Extract name from tuple
+        name = name[0]  # Extract name string from tuple
         func = BENCHMARK_FUNCS[name]
             
         weight = benchmark_weights.get(name, 1.0)
@@ -191,8 +218,8 @@ def compare(
         total_score2 += weighted_score2
 
         # Format scores with confidence intervals if available
-        result1 = func(str(codebase1))
-        result2 = func(str(codebase2))
+        result1 = result_objects1[name]
+        result2 = result_objects2[name]
         
         if isinstance(result1, BenchmarkResult):
             score1_display = result1.format_score_with_ci()

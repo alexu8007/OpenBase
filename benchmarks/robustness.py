@@ -1,4 +1,6 @@
 import ast
+
+SUPPORTED_LANGUAGES = {"python"}
 from .utils import get_python_files, parse_file
 
 def assess_robustness(codebase_path: str):

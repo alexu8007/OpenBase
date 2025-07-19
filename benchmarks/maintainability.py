@@ -1,4 +1,6 @@
 from radon.metrics import mi_visit
+
+SUPPORTED_LANGUAGES = {"python"}
 from .utils import get_python_files
 from .stats_utils import BenchmarkResult, calculate_confidence_interval, adjust_score_for_size, get_codebase_size_bucket
 

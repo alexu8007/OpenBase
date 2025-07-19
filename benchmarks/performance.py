@@ -1,6 +1,10 @@
 import ast
 import os
 import subprocess
+import shutil
+
+# Works across languages via lizard
+SUPPORTED_LANGUAGES = {"any"}
 import json
 import tempfile
 import statistics
@@ -21,7 +25,7 @@ def assess_performance(codebase_path: str) -> BenchmarkResult:
     raw_metrics = {}
     
     # === STATIC ANALYSIS ===
-    static_score, static_details = _assess_static_performance(python_files)
+    static_score, static_details = _assess_static_performance(codebase_path, python_files)
     details.extend(static_details)
     raw_metrics["static_score"] = static_score
     
@@ -60,46 +64,84 @@ def assess_performance(codebase_path: str) -> BenchmarkResult:
     )
 
 
-def _assess_static_performance(python_files: List[str]) -> tuple[float, List[str]]:
-    """Static anti-pattern detection."""
-    details = []
-    anti_patterns_found = 0
-    performance_score = 10.0
+def _assess_static_performance(codebase_path: str, python_files: List[str]) -> tuple[float, List[str]]:
+    """Language-agnostic static performance heuristics via Lizard + optional Python anti-pattern checks."""
+    details: List[str] = []
+    penalties = 0.0
 
+    # ---------------------------------------------------------------
+    # 1. Universal metrics using `lizard` (supports many languages)
+    # ---------------------------------------------------------------
+    lizard_executable = shutil.which("lizard")
+    if not lizard_executable:
+        details.append("[!] 'lizard' not installed; install via 'pip install lizard' for cross-language complexity analysis.")
+        avg_cc = None
+        total_funcs = 0
+    else:
+        try:
+            proc = subprocess.run([lizard_executable, "-j", codebase_path], capture_output=True, text=True, check=False)
+            if proc.returncode == 0:
+                data = json.loads(proc.stdout)
+                func_records = [f for file in data.get("files", []) for f in file.get("functions", [])]
+                total_funcs = len(func_records)
+                cc_values = [f.get("cyclomatic_complexity", 0) for f in func_records]
+                avg_cc = (sum(cc_values) / total_funcs) if total_funcs else None
+
+                if avg_cc is not None:
+                    details.append(f"Average cyclomatic complexity (all languages): {avg_cc:.1f}")
+                    # Penalty: 1 point for every 2 points above CC=10
+                    if avg_cc > 10:
+                        penalties += (avg_cc - 10) / 2
+
+                    # High-complexity function penalty
+                    high_cc_funcs = [v for v in cc_values if v > 20]
+                    if high_cc_funcs:
+                        ratio = len(high_cc_funcs) / total_funcs
+                        penalties += ratio * 3  # up to 3-point penalty
+                        details.append(f"{len(high_cc_funcs)} / {total_funcs} functions have CC > 20")
+            else:
+                details.append("[!] lizard failed to analyze the codebase.")
+                avg_cc = None
+                total_funcs = 0
+        except Exception as e:
+            details.append(f"[!] lizard execution error: {e}")
+            avg_cc = None
+            total_funcs = 0
+
+    # ---------------------------------------------------------------
+    # 2. Python-specific anti-pattern scan (kept from previous logic)
+    # ---------------------------------------------------------------
+    anti_patterns_found = 0.0
     for file_path in python_files:
         tree = parse_file(file_path)
         if not tree:
             continue
 
         for node in ast.walk(tree):
-            # Anti-pattern: list.insert(0, val)
-            if (isinstance(node, ast.Call) and
-                isinstance(node.func, ast.Attribute) and
-                node.func.attr == 'insert' and
-                len(node.args) == 2 and
-                hasattr(node.args[0], 'value') and node.args[0].value == 0):
-                details.append(f"Inefficient 'list.insert(0, ...)' at {file_path}:{node.lineno}")
+            if (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute) and node.func.attr == 'insert' and len(node.args) == 2 and hasattr(node.args[0], 'value') and node.args[0].value == 0):
+                details.append(f"Inefficient 'list.insert(0, …)' at {file_path}:{node.lineno}")
                 anti_patterns_found += 1
-
-            # Anti-pattern: string concatenation in loops
             if isinstance(node, (ast.For, ast.While)):
                 for sub_node in ast.walk(node):
-                    if isinstance(sub_node, ast.AugAssign) and isinstance(sub_node.op, ast.Add):
-                        if isinstance(sub_node.target, ast.Name):
-                            details.append(f"String concatenation in loop at {file_path}:{node.lineno}")
-                            anti_patterns_found += 0.5
-
-            # Anti-pattern: nested loops (O(n²) potential)
+                    if isinstance(sub_node, ast.AugAssign) and isinstance(sub_node.op, ast.Add) and isinstance(sub_node.target, ast.Name):
+                        details.append(f"String concatenation in loop at {file_path}:{node.lineno}")
+                        anti_patterns_found += 0.5
             if isinstance(node, ast.For):
                 for sub_node in ast.walk(node):
-                    if isinstance(sub_node, ast.For) and sub_node != node:
+                    if isinstance(sub_node, ast.For) and sub_node is not node:
                         details.append(f"Nested loops (O(n²) risk) at {file_path}:{node.lineno}")
                         anti_patterns_found += 0.3
 
-    performance_score -= anti_patterns_found
-    details.insert(0, f"Static analysis: {anti_patterns_found} performance anti-patterns found")
-    
-    return min(10.0, max(0.0, performance_score)), details
+    if anti_patterns_found:
+        details.insert(0, f"Python anti-patterns found: {anti_patterns_found}")
+        penalties += anti_patterns_found
+
+    # ---------------------------------------------------------------
+    # Final score (0-10 after penalties)
+    # ---------------------------------------------------------------
+    performance_score = 10.0 - penalties
+    performance_score = max(0.0, min(10.0, performance_score))
+    return performance_score, details
 
 
 def _assess_dynamic_performance(profile_script: str) -> tuple[float, List[str], Dict[str, Any]]:

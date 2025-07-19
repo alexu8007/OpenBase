@@ -1,0 +1,26 @@
+{
+  "codebase": "codebaseA",
+  "timestamp": "2025-07-19T00:38:43.097480",
+  "overall_score": 69.17647058823529,
+  "metrics": [
+    {
+      "name": "Readability",
+      "score": 69.17647058823529,
+      "weight": 1.0,
+      "details": [
+        "Average cyclomatic complexity: 3.47",
+        "Found 313 PEP8 style violations."
+      ],
+      "raw_data": {},
+      "error": null
+    }
+  ],
+  "summary": {
+    "total_metrics": 1,
+    "successful_metrics": 1,
+    "failed_metrics": 0,
+    "categories": [
+      "general"
+    ]
+  }
+}
