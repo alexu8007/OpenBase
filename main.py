@@ -10,6 +10,7 @@ from rich.align import Align
 from rich import box
 from pathlib import Path
 import json
+from collections import defaultdict
 import os
 import time
 
@@ -71,6 +72,100 @@ for mod in BUILT_IN_MODULES:
     if langs == "any":
         langs = {"any"}
     BENCHMARK_LANGS[display_name] = {lang.lower() for lang in langs}
+
+def _analyze_single_codebase(path: Path, skip_set, benchmark_weights):
+    """Run benchmarks on a single codebase directory and return raw score dict."""
+    from benchmarks.language_utils import detect_languages
+    langs = detect_languages(path)
+    raw_scores = {}
+
+    for name, func in BENCHMARK_FUNCS.items():
+        if name in skip_set:
+            continue
+        supported = BENCHMARK_LANGS.get(name, {"any"})
+        if "any" not in supported and not (langs & supported):
+            continue
+        result = func(str(path))
+        if isinstance(result, BenchmarkResult):
+            raw_scores[name] = result.score
+        else:
+            raw_scores[name] = result[0] if isinstance(result, tuple) else result
+    return raw_scores
+
+@app.command()
+def compare_collections(
+    folder1: Path = typer.Option(..., "--folder1", help="Directory containing multiple repos (collection 1)"),
+    folder2: Path = typer.Option(..., "--folder2", help="Directory containing multiple repos (collection 2)"),
+    skip: str = typer.Option('', "--skip", help="Comma-separated list of benchmark names to skip."),
+    weights: str = typer.Option('{}', "--weights", help='JSON string to weight benchmarks.'),
+):
+    """Compare two *collections* of repositories (every immediate subdirectory is treated as a repo)."""
+    if not folder1.is_dir() or not folder2.is_dir():
+        console.print("[bold red]Error: Both folders must be valid directories.[/bold red]")
+        raise typer.Exit(code=1)
+
+    try:
+        benchmark_weights = json.loads(weights)
+    except json.JSONDecodeError:
+        console.print("[bold red]Error: Invalid JSON format for weights.[/bold red]")
+        raise typer.Exit(code=1)
+
+    skip_set = {s.strip().capitalize() for s in skip.split(',') if s.strip()}
+
+    def _collect(folder, progress, task_id):
+        repo_dirs = [d for d in folder.iterdir() if d.is_dir() and not d.name.startswith('.')]
+        aggregate: defaultdict[str, list] = defaultdict(list)
+        for repo in repo_dirs:
+            # Update progress bar description
+            progress.update(task_id, description=f"{folder.name}/{repo.name}")
+            raw_scores = _analyze_single_codebase(repo, skip_set, benchmark_weights)
+            for k, v in raw_scores.items():
+                aggregate[k].append(v)
+            progress.advance(task_id)
+        avg_scores = {k: (sum(vs)/len(vs) if vs else 0.0) for k, vs in aggregate.items()}
+        return avg_scores, len(repo_dirs)
+
+    from rich.progress import Progress, SpinnerColumn, TextColumn, BarColumn, TimeElapsedColumn
+    total_repos = sum(1 for _ in folder1.iterdir() if _.is_dir() and not _.name.startswith('.')) + sum(1 for _ in folder2.iterdir() if _.is_dir() and not _.name.startswith('.'))
+    with Progress(
+        SpinnerColumn(),
+        TextColumn("[progress.description]{task.description}"),
+        BarColumn(),
+        TextColumn("[progress.percentage]{task.percentage:>3.0f}%"),
+        TimeElapsedColumn(),
+        console=console,
+        transient=True
+    ) as progress:
+        task_id = progress.add_task("Analyzing repositories...", total=total_repos)
+        avg1, n1 = _collect(folder1, progress, task_id)
+        avg2, n2 = _collect(folder2, progress, task_id)
+
+    console.print(Align.center("[bold blue]🔍 OpenBase Collection Analysis[/bold blue]"))
+    console.print(Align.center(f"Comparing collection [magenta]{folder1.name}[/magenta] ({n1} repos) vs [green]{folder2.name}[/green] ({n2} repos)"))
+    console.print()
+
+    # Build table
+    from rich.table import Table
+    table = Table(title="📊 Collection Quality Comparison", box=box.ROUNDED)
+    table.add_column("Benchmark", style="cyan")
+    table.add_column(f"🔵 {folder1.name}")
+    table.add_column(f"🟢 {folder2.name}")
+    table.add_column("Winner")
+
+    total1 = total2 = 0.0
+    for name in sorted(set(list(avg1.keys()) + list(avg2.keys()))):
+        score1 = avg1.get(name, 0.0)
+        score2 = avg2.get(name, 0.0)
+        weight = benchmark_weights.get(name, 1.0)
+        total1 += score1 * weight
+        total2 += score2 * weight
+        winner = "🔵" if score1 > score2 else ("🟢" if score2 > score1 else "🤝")
+        table.add_row(name, f"{score1:.2f}", f"{score2:.2f}", winner)
+
+    table.add_row("", "", "", "")
+    table.add_row("TOTAL", f"{total1:.2f}", f"{total2:.2f}", "🔵" if total1 > total2 else ("🟢" if total2 > total1 else "🤝"))
+    console.print(table)
+
 
 @app.command()
 def compare(
