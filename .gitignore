@@ -1,5 +1,8 @@
 *.env
 .env    
 
+.venv
+
 ./codebaseA
 ./codebaseB
+./repos
