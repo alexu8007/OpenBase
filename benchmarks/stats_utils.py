@@ -13,7 +13,7 @@ def get_codebase_size_bucket(codebase_path: str) -> str:
     for file_path in python_files:
         try:
             with open(file_path, 'r', encoding='utf-8') as f:
-                total_loc += len([line for line in f if line.strip()])
+                total_loc += sum(1 for line in f if line.strip())
         except (UnicodeDecodeError, IOError):
             continue
     
@@ -100,13 +100,21 @@ class BenchmarkResult:
         raw_metrics: Dict[str, Any] = None,
         confidence_interval: Tuple[float, float] = None
     ):
+        """Initialize a new BenchmarkResult instance with the given parameters.
+
+        Args:
+            score (float): The primary score.
+            details (List[str]): A list of additional details.
+            raw_metrics (Dict[str, Any], optional): Raw metrics dictionary.
+            confidence_interval (Tuple[float, float], optional): Confidence interval tuple.
+        """
         self.score = score
         self.details = details
         self.raw_metrics = raw_metrics or {}
         self.confidence_interval = confidence_interval or (score, score)
     
     def __iter__(self):
-        """Maintain backward compatibility with tuple unpacking."""
+        """Enable iteration over the object for backward compatibility."""
         return iter([self.score, self.details])
     
     def format_score_with_ci(self) -> str:
@@ -115,4 +123,4 @@ class BenchmarkResult:
             return f"{self.score:.2f}"
         
         ci_range = self.confidence_interval[1] - self.confidence_interval[0]
-        return f"{self.score:.2f} ±{ci_range/2:.1f}" 
+        return f"{self.score:.2f} ±{ci_range/2:.1f}"
