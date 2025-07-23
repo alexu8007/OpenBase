@@ -17,10 +17,12 @@ def assess_maintainability(codebase_path: str) -> BenchmarkResult:
     details = []
     raw_metrics = {}
     
+    # Iterate through each Python file to calculate its Maintainability Index
     for file_path in python_files:
         with open(file_path, 'r', encoding='utf-8') as f:
             code = f.read()
         if code.strip():
+            # Attempt to calculate MI and handle potential exceptions
             try:
                 mi = mi_visit(code, multi=True)
                 file_mis.append(mi)
@@ -48,7 +50,7 @@ def assess_maintainability(codebase_path: str) -> BenchmarkResult:
     details.insert(0, f"Average maintainability index (MI): {avg_mi:.2f} (size: {size_bucket})")
     
     # === CONFIDENCE INTERVAL ===
-    # Use file-level MI scores to calculate confidence
+    # Calculate confidence interval using file-level MI scores
     confidence_interval = calculate_confidence_interval(file_mis)
     
     return BenchmarkResult(
@@ -56,4 +58,4 @@ def assess_maintainability(codebase_path: str) -> BenchmarkResult:
         details=details,
         raw_metrics=raw_metrics,
         confidence_interval=(confidence_interval[0]/10.0, confidence_interval[1]/10.0)  # Scale to 0-10
-    ) 
+    )
