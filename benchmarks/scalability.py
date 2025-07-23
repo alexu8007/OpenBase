@@ -39,11 +39,12 @@ def assess_scalability(codebase_path: str):
 
         for node in ast.walk(tree):
             if isinstance(node, ast.Import):
-                for alias in node.names:
-                    if "asyncio" in alias.name: uses_asyncio = True
-                    if "async" in alias.name: uses_asyncio = True
-                    if "multiprocessing" in alias.name: uses_multiprocessing = True
-                    if any(keyword in alias.name for keyword in caching_keywords): uses_caching_libs = True
+                if any("asyncio" in alias.name or "async" in alias.name for alias in node.names):
+                    uses_asyncio = True
+                if any("multiprocessing" in alias.name for alias in node.names):
+                    uses_multiprocessing = True
+                if any(any(keyword in alias.name for keyword in caching_keywords) for alias in node.names):
+                    uses_caching_libs = True
             elif isinstance(node, ast.ImportFrom):
                 if node.module:
                     if "asyncio" in node.module: uses_asyncio = True
@@ -86,11 +87,11 @@ def assess_scalability(codebase_path: str):
         try:
             genai.configure(api_key=api_key)
 
-            summary = (
-                f"Python files: {len(python_files)}, total functions: {total_functions}, "
-                f"async functions: {async_functions}, uses_asyncio: {uses_asyncio}, "
+            summary = ''.join([
+                f"Python files: {len(python_files)}, total functions: {total_functions}, ",
+                f"async functions: {async_functions}, uses_asyncio: {uses_asyncio}, ",
                 f"uses_multiprocessing: {uses_multiprocessing}, uses_caching_libs: {uses_caching_libs}."
-            )
+            ])
 
             prompt = (
                 "You are an expert software architect.\n"
@@ -121,12 +122,12 @@ def assess_scalability(codebase_path: str):
                 if snippet_chars + len(content) > MAX_CHARS:
                     break
 
-                snippets.append(f"FILE: {file_path}\n```\n{content}\n```\n")
+                snippets.append(f"FILE: {file_path}\n\n{content}\n\n")
                 snippet_chars += len(content)
 
             code_corpus = "\n".join(snippets)
 
-            full_prompt = prompt + "\nHere are code excerpts:\n" + code_corpus
+            full_prompt = ''.join([prompt, "\nHere are code excerpts:\n", code_corpus])
 
             rsp = model.generate_content(full_prompt, generation_config={"temperature": 0.0})
             first_token = rsp.text.strip().split()[0]
@@ -144,4 +145,4 @@ def assess_scalability(codebase_path: str):
             details.append("GEMINI_API_KEY environment variable not set; skipping Gemini evaluation.")
 
     final_score = llm_score_0_to_10 if llm_score_0_to_10 is not None else min(10.0, max(0.0, score))
-    return final_score, details 
+    return final_score, details
