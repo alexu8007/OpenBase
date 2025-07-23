@@ -79,13 +79,15 @@ def _assess_static_performance(codebase_path: str, python_files: List[str]) -> t
         total_funcs = 0
     else:
         try:
-            proc = subprocess.run([lizard_executable, "-j", codebase_path], capture_output=True, text=True, check=False)
+            proc = subprocess.run([lizard_executable, "-j", codebase_path], capture_output=True, text=True, check=False, shell=False)
             if proc.returncode == 0:
                 data = json.loads(proc.stdout)
                 func_records = [f for file in data.get("files", []) for f in file.get("functions", [])]
                 total_funcs = len(func_records)
-                cc_values = [f.get("cyclomatic_complexity", 0) for f in func_records]
-                avg_cc = (sum(cc_values) / total_funcs) if total_funcs else None
+                if total_funcs:
+                    avg_cc = sum(f.get("cyclomatic_complexity", 0) for f in func_records) / total_funcs
+                else:
+                    avg_cc = None
 
                 if avg_cc is not None:
                     details.append(f"Average cyclomatic complexity (all languages): {avg_cc:.1f}")
@@ -94,11 +96,11 @@ def _assess_static_performance(codebase_path: str, python_files: List[str]) -> t
                         penalties += (avg_cc - 10) / 2
 
                     # High-complexity function penalty
-                    high_cc_funcs = [v for v in cc_values if v > 20]
+                    high_cc_funcs = sum(1 for f in func_records if f.get("cyclomatic_complexity", 0) > 20)
                     if high_cc_funcs:
-                        ratio = len(high_cc_funcs) / total_funcs
+                        ratio = high_cc_funcs / total_funcs
                         penalties += ratio * 3  # up to 3-point penalty
-                        details.append(f"{len(high_cc_funcs)} / {total_funcs} functions have CC > 20")
+                        details.append(f"{high_cc_funcs} / {total_funcs} functions have CC > 20")
             else:
                 details.append("[!] lizard failed to analyze the codebase.")
                 avg_cc = None
@@ -116,21 +118,9 @@ def _assess_static_performance(codebase_path: str, python_files: List[str]) -> t
         tree = parse_file(file_path)
         if not tree:
             continue
-
-        for node in ast.walk(tree):
-            if (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute) and node.func.attr == 'insert' and len(node.args) == 2 and hasattr(node.args[0], 'value') and node.args[0].value == 0):
-                details.append(f"Inefficient 'list.insert(0, …)' at {file_path}:{node.lineno}")
-                anti_patterns_found += 1
-            if isinstance(node, (ast.For, ast.While)):
-                for sub_node in ast.walk(node):
-                    if isinstance(sub_node, ast.AugAssign) and isinstance(sub_node.op, ast.Add) and isinstance(sub_node.target, ast.Name):
-                        details.append(f"String concatenation in loop at {file_path}:{node.lineno}")
-                        anti_patterns_found += 0.5
-            if isinstance(node, ast.For):
-                for sub_node in ast.walk(node):
-                    if isinstance(sub_node, ast.For) and sub_node is not node:
-                        details.append(f"Nested loops (O(n²) risk) at {file_path}:{node.lineno}")
-                        anti_patterns_found += 0.3
+        sub_details, sub_anti_patterns = detect_anti_patterns(tree, file_path)
+        details.extend(sub_details)
+        anti_patterns_found += sub_anti_patterns
 
     if anti_patterns_found:
         details.insert(0, f"Python anti-patterns found: {anti_patterns_found}")
@@ -142,6 +132,34 @@ def _assess_static_performance(codebase_path: str, python_files: List[str]) -> t
     performance_score = 10.0 - penalties
     performance_score = max(0.0, min(10.0, performance_score))
     return performance_score, details
+
+def detect_anti_patterns(tree: ast.Module, file_path: str) -> tuple[List[str], float]:
+    details = []
+    anti_patterns_found = 0.0
+    for node in ast.walk(tree):
+        if (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute) and node.func.attr == 'insert' and len(node.args) == 2 and hasattr(node.args[0], 'value') and node.args[0].value == 0):
+            try:
+                details.append(f"Inefficient 'list.insert(0, …)' at {file_path}:{node.lineno}")
+                anti_patterns_found += 1
+            except Exception as e:
+                details.append(f"Error detecting pattern: {e}")
+        if isinstance(node, (ast.For, ast.While)):
+            for sub_node in ast.walk(node):
+                if isinstance(sub_node, ast.AugAssign) and isinstance(sub_node.op, ast.Add) and isinstance(sub_node.target, ast.Name):
+                    try:
+                        details.append(f"String concatenation in loop at {file_path}:{node.lineno}")
+                        anti_patterns_found += 0.5
+                    except Exception as e:
+                        details.append(f"Error detecting pattern: {e}")
+        if isinstance(node, ast.For):
+            for sub_node in ast.walk(node):
+                if isinstance(sub_node, ast.For) and sub_node is not node:
+                    try:
+                        details.append(f"Nested loops (O(n²) risk) at {file_path}:{node.lineno}")
+                        anti_patterns_found += 0.3
+                    except Exception as e:
+                        details.append(f"Error detecting pattern: {e}")
+    return details, anti_patterns_found
 
 
 def _assess_dynamic_performance(profile_script: str) -> tuple[float, List[str], Dict[str, Any]]:
@@ -160,15 +178,15 @@ def _assess_dynamic_performance(profile_script: str) -> tuple[float, List[str], 
         
         try:
             cmd = ["pyinstrument", "--json", "-o", time_report_path, profile_script]
-            proc = subprocess.run(cmd, capture_output=True, text=True, check=False)
+            proc = subprocess.run(cmd, capture_output=True, text=True, check=False, shell=False)
             
             if proc.returncode == 0 and os.path.exists(time_report_path):
                 with open(time_report_path) as f:
                     time_data = json.load(f)
                 execution_time = time_data.get("duration", 0) * 1000  # ms
                 execution_times.append(execution_time)
-        except Exception:
-            pass
+        except subprocess.SubprocessError as e:
+            details.append(f"Subprocess error: {e}")
         finally:
             if os.path.exists(time_report_path):
                 os.remove(time_report_path)
@@ -176,7 +194,7 @@ def _assess_dynamic_performance(profile_script: str) -> tuple[float, List[str], 
         # === MEMORY PROFILING ===
         try:
             cmd = ["python", "-m", "memory_profiler", profile_script]
-            proc = subprocess.run(cmd, capture_output=True, text=True, check=False)
+            proc = subprocess.run(cmd, capture_output=True, text=True, check=False, shell=False)
             
             if proc.returncode == 0:
                 # Parse memory_profiler output for peak usage
@@ -193,8 +211,8 @@ def _assess_dynamic_performance(profile_script: str) -> tuple[float, List[str], 
                                     break
                                 except ValueError:
                                     pass
-        except Exception:
-            pass
+        except subprocess.SubprocessError as e:
+            details.append(f"Subprocess error: {e}")
     
     # === SCORING ===
     if execution_times:
@@ -244,4 +262,4 @@ def _assess_dynamic_performance(profile_script: str) -> tuple[float, List[str], 
     # Combined dynamic score
     dynamic_score = (time_score + memory_score) / 2.0
     
-    return dynamic_score, details, metrics 
+    return dynamic_score, details, metrics
