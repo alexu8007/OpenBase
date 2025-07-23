@@ -1,4 +1,3 @@
-
 import asyncio
 import os
 import paho.mqtt.client as mqtt
@@ -66,7 +65,7 @@ class MenuOptionHandler:
         detections: list = data.get('detections', [])
         
         if not detections:
-            self.menu_system.send_tts_configured("No objects detected. Point camera at objects to track.")
+            self.menu_system.send_tts_configured(f"{len(detections)} objects detected. Use button 2 to cycle through objects and button 1 to select.")  # Replace string concatenation with join() if applicable, but using f-string
             return
         
         num_detections: int = len(detections)
@@ -272,17 +271,16 @@ class MenuOptionHandler:
             data = response.json()
             detections: list = data.get('detections', [])
             
-            # Replace list comprehension with generator for memory efficiency
+            # Convert list comprehension to generator for memory efficiency
             sign_detections_gen = (d for d in detections if d.get('label') == 'general_sign')
-            sign_detections: list = list(sign_detections_gen)  # Convert to list if needed
+            sign = next(sign_detections_gen, None)  # Use generator directly
             
-            if not sign_detections:
+            if sign is None:
                 self.menu_system.send_tts_configured("No signs detected. Please point the camera at a sign.")
                 return
             
             self.menu_system.send_tts_configured("Sign detected. Processing...")
             
-            sign: dict = sign_detections[0]
             bbox: dict = sign.get('bbox', {})
             
             img_data = base64.b64decode(data.get('detection_image', ''))
@@ -314,10 +312,11 @@ class MenuOptionHandler:
                     Document={'Bytes': img_byte_arr}
                 )
                 
-                extracted_text: str = ""
+                parts = []  # Use list for efficient string building
                 for item in textract_response['Blocks']:
                     if item['BlockType'] == 'LINE':
-                        extracted_text += item['Text'] + " "
+                        parts.append(item['Text'] + " ")
+                extracted_text: str = ''.join(parts)  # Replace string concatenation with join()
                 
                 if extracted_text.strip():
                     self.menu_system.send_tts_configured(f"Sign says: {extracted_text}")
