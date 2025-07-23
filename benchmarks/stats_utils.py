@@ -13,8 +13,8 @@ def get_codebase_size_bucket(codebase_path: str) -> str:
     for file_path in python_files:
         try:
             with open(file_path, 'r', encoding='utf-8') as f:
-                total_loc += len([line for line in f if line.strip()])
-        except (UnicodeDecodeError, IOError):
+                total_loc += len((line for line in f if line.strip()))
+        except (UnicodeDecodeError, IOError, TypeError):
             continue
     
     if total_loc < 100:
@@ -115,4 +115,4 @@ class BenchmarkResult:
             return f"{self.score:.2f}"
         
         ci_range = self.confidence_interval[1] - self.confidence_interval[0]
-        return f"{self.score:.2f} ±{ci_range/2:.1f}" 
+        return ''.join([f"{self.score:.2f}", " ±", f"{ci_range/2:.1f}"])
