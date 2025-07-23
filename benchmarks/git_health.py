@@ -31,9 +31,8 @@ def assess_git_health(codebase_path: str):
 
     for commit in commits:
         author_counter[commit.author.email] += 1
-        for f in commit.stats.files.keys():
-            if f.endswith(".py") and f.startswith(codebase_path):
-                file_counter[f] += 1
+        matching_files = [f for f in commit.stats.files.keys() if f.endswith(".py") and f.startswith(codebase_path)]
+        file_counter.update(matching_files)
 
     details: List[str] = []
 
@@ -42,10 +41,10 @@ def assess_git_health(codebase_path: str):
 
     most_changed = file_counter.most_common(5)
     for f, n in most_changed:
-        details.append(f"{f} changed {n} times in last 6 months.")
+        details.append(' '.join([f, "changed", str(n), "times in last 6 months."]))
 
     avg_churn = sum(file_counter.values()) / len(file_counter)
-    details.insert(0, f"Average churn / file: {avg_churn:.1f} commits in last 6 months.")
+    details.insert(0, ' '.join(["Average churn / file:", f"{avg_churn:.1f}", "commits in last 6 months."]))
 
     bus_factor = len(author_counter)
     details.append(f"Bus factor (unique committers): {bus_factor}")
@@ -66,4 +65,4 @@ def assess_git_health(codebase_path: str):
     return min(10.0, score), details
 
 # Backward compatibility alias
-assess_githealth = assess_git_health 
+assess_githealth = assess_git_health
