@@ -14,6 +14,40 @@ except ImportError:  # pragma: no cover
 
 from .utils import get_python_files, parse_file
 
+class ScalabilityVisitor(ast.NodeVisitor):
+    def __init__(self):
+        self.uses_asyncio = False
+        self.uses_multiprocessing = False
+        self.uses_caching_libs = False
+        self.async_functions = 0
+        self.total_functions = 0
+        self.caching_keywords = ["redis", "memcached", "celery", "cache", "cachetools", "cachetools.cached"]
+
+    def visit_Import(self, node):
+        for alias in node.names:
+            if "asyncio" in alias.name: self.uses_asyncio = True
+            if "async" in alias.name: self.uses_asyncio = True
+            if "multiprocessing" in alias.name: self.uses_multiprocessing = True
+            if any(keyword in alias.name for keyword in self.caching_keywords): self.uses_caching_libs = True
+        self.generic_visit(node)
+
+    def visit_ImportFrom(self, node):
+        if node.module:
+            if "asyncio" in node.module: self.uses_asyncio = True
+            if "async" in node.module: self.uses_asyncio = True
+            if "multiprocessing" in node.module: self.uses_multiprocessing = True
+            if any(keyword in node.module for keyword in self.caching_keywords): self.uses_caching_libs = True
+        self.generic_visit(node)
+
+    def visit_FunctionDef(self, node):
+        self.total_functions += 1
+        self.generic_visit(node)
+
+    def visit_AsyncFunctionDef(self, node):
+        self.total_functions += 1
+        self.async_functions += 1
+        self.generic_visit(node)
+
 def assess_scalability(codebase_path: str):
     """
     Assesses scalability by checking for use of asyncio, multiprocessing, and caching.
@@ -30,32 +64,16 @@ def assess_scalability(codebase_path: str):
     total_functions = 0
     details = []
     
-    caching_keywords = ["redis", "memcached", "celery", "cache", "cachetools", "cachetools.cached"]
-
     for file_path in python_files:
         tree = parse_file(file_path)
-        if not tree:
-            continue
-
-        for node in ast.walk(tree):
-            if isinstance(node, ast.Import):
-                for alias in node.names:
-                    if "asyncio" in alias.name: uses_asyncio = True
-                    if "async" in alias.name: uses_asyncio = True
-                    if "multiprocessing" in alias.name: uses_multiprocessing = True
-                    if any(keyword in alias.name for keyword in caching_keywords): uses_caching_libs = True
-            elif isinstance(node, ast.ImportFrom):
-                if node.module:
-                    if "asyncio" in node.module: uses_asyncio = True
-                    if "async" in node.module: uses_asyncio = True
-                    if "multiprocessing" in node.module: uses_multiprocessing = True
-                    if any(keyword in node.module for keyword in caching_keywords): uses_caching_libs = True
-
-            if isinstance(node, ast.FunctionDef):
-                total_functions += 1
-            elif isinstance(node, ast.AsyncFunctionDef):
-                total_functions += 1
-                async_functions += 1
+        if tree:
+            visitor = ScalabilityVisitor()
+            visitor.visit(tree)
+            uses_asyncio = uses_asyncio or visitor.uses_asyncio
+            uses_multiprocessing = uses_multiprocessing or visitor.uses_multiprocessing
+            uses_caching_libs = uses_caching_libs or visitor.uses_caching_libs
+            async_functions += visitor.async_functions
+            total_functions += visitor.total_functions
 
     # ------------------------------------------------------------------ #
     # Heuristic score based on static analysis (0-10 scale)
@@ -86,11 +104,7 @@ def assess_scalability(codebase_path: str):
         try:
             genai.configure(api_key=api_key)
 
-            summary = (
-                f"Python files: {len(python_files)}, total functions: {total_functions}, "
-                f"async functions: {async_functions}, uses_asyncio: {uses_asyncio}, "
-                f"uses_multiprocessing: {uses_multiprocessing}, uses_caching_libs: {uses_caching_libs}."
-            )
+            summary = f"Python files: {len(python_files)}, total functions: {total_functions}, async functions: {async_functions}, uses_asyncio: {uses_asyncio}, uses_multiprocessing: {uses_multiprocessing}, uses_caching_libs: {uses_caching_libs}."
 
             prompt = (
                 "You are an expert software architect.\n"
@@ -121,12 +135,12 @@ def assess_scalability(codebase_path: str):
                 if snippet_chars + len(content) > MAX_CHARS:
                     break
 
-                snippets.append(f"FILE: {file_path}\n```\n{content}\n```\n")
+                snippets.append(f"FILE: {file_path}\n\n{content}\n\n")
                 snippet_chars += len(content)
 
             code_corpus = "\n".join(snippets)
 
-            full_prompt = prompt + "\nHere are code excerpts:\n" + code_corpus
+            full_prompt = ''.join([prompt, "\nHere are code excerpts:\n", code_corpus])
 
             rsp = model.generate_content(full_prompt, generation_config={"temperature": 0.0})
             first_token = rsp.text.strip().split()[0]
@@ -144,4 +158,4 @@ def assess_scalability(codebase_path: str):
             details.append("GEMINI_API_KEY environment variable not set; skipping Gemini evaluation.")
 
     final_score = llm_score_0_to_10 if llm_score_0_to_10 is not None else min(10.0, max(0.0, score))
-    return final_score, details 
+    return final_score, details
