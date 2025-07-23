@@ -13,15 +13,16 @@ def assess_testability(codebase_path: str):
     
     # Check for presence of test files
     python_files = get_python_files(codebase_path)
-    test_files = [f for f in python_files if "test" in os.path.basename(f).lower()]
-    if not test_files:
+    test_files = (f for f in python_files if "test" in os.path.basename(f).lower())
+    if not any(test_files):
         return 0.0, ["No test files found (e.g., files named test_*.py)."]
 
     json_report_path = os.path.join(codebase_path, "coverage.json")
     
     # Run pytest with coverage
     try:
-        # Note: This assumes the codebase's dependencies are installed in the environment.
+        if not os.path.isdir(codebase_path):
+            return 0.0, ["Invalid codebase path."]
         command = [
             "pytest",
             "--cov=" + codebase_path,
@@ -55,4 +56,4 @@ def assess_testability(codebase_path: str):
         if os.path.exists(json_report_path):
             os.remove(json_report_path) # Clean up
 
-    return min(10.0, max(0.0, score)), details 
+    return min(10.0, max(0.0, score)), details
