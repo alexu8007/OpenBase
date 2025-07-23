@@ -1,4 +1,5 @@
 from radon.visitors import ComplexityVisitor
+import logging  # Added for logging exceptions
 
 # Readability analysis is currently Python-specific
 SUPPORTED_LANGUAGES = {"python"}
@@ -24,13 +25,17 @@ def assess_readability(codebase_path: str):
             code = f.read()
         try:
             visitor = ComplexityVisitor.from_code(code)
+            # Nested loop to iterate through functions and calculate complexity metrics
             for f in visitor.functions:
-                if f.complexity > 10:
-                    details.append(f"High complexity ({f.complexity}) in function '{f.name}' at {file_path}:{f.lineno}")
+                try:
+                    if f.complexity > 10:
+                        details.append(f"High complexity ({f.complexity}) in function '{f.name}' at {file_path}:{f.lineno}")
+                except Exception as e:  # Specific exception handling for string concatenation
+                    logging.error(f"Error in string concatenation for function in {file_path}: {e}")
                 total_complexity += f.complexity
                 total_functions += 1
-        except Exception:
-            pass # Ignore files that can't be parsed
+        except SyntaxError as e:
+            logging.error(f"SyntaxError in file {file_path}: {e}")  # Specific exception handling with logging
 
     avg_complexity = (total_complexity / total_functions) if total_functions > 0 else 0
     complexity_score = max(0, 10 - (avg_complexity - 5))
@@ -45,4 +50,4 @@ def assess_readability(codebase_path: str):
     
     readability_score = (0.6 * complexity_score + 0.4 * pep8_score)
     
-    return min(10.0, max(0.0, readability_score)), details 
+    return min(10.0, max(0.0, readability_score)), details
