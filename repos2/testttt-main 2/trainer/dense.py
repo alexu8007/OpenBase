@@ -29,8 +29,8 @@ while True:
     # get dataset
     with open("finaldata/{}.msgpack".format(dataset_num), "rb") as f:
         data = msgpack.load(f)
-    x_train = np.array([np.array(sample['input']).flatten() for sample in data])
-    y_train = np.array([sample['output'] for sample in data])
+    x_train = np.array( (np.array(sample['input']).flatten() for sample in data) )
+    y_train = np.array( (sample['output'] for sample in data) )
     # train the model on the dataset
     model.fit(x_train, y_train, batch_size=32, epochs=5, validation_split=0.04)
     # save the model
