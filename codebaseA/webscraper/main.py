@@ -1,4 +1,3 @@
-
 import snakeCatcher
 import msgpack
 from typing import List, Set, Tuple
@@ -104,7 +103,7 @@ def _process_single_game(
         bool: True if the game was successfully processed and added, False otherwise.
     """
     if game_id in processed_games_cache:
-        print(f"\t\tGame {game_index} with id {game_id} skipped as it already exists in the database.")
+        print(''.join(['\t\tGame ', str(game_index), ' with id ', game_id, ' skipped as it already exists in the database.']))
         return False
 
     print(f"\t\tProcessing game {game_index} with id {game_id}")
@@ -177,7 +176,7 @@ def main() -> None:
     # 3. Apply the cutoff to select a subset of snakes for processing
     num_snakes_to_process = round(len(all_leaderboard_snake_ids) * _SNAKE_LEADERBOARD_CUTOFF)
     snake_ids_for_processing = all_leaderboard_snake_ids[:num_snakes_to_process]
-    print(f"Taking top {len(snake_ids_for_processing)} snakes on the leaderboard for processing.")
+    print(''.join(['Taking top ', str(len(snake_ids_for_processing)), ' snakes on the leaderboard for processing.']))
 
     # 4. Iterate through the selected snakes and process each one
     for i, snake_id in enumerate(snake_ids_for_processing):
