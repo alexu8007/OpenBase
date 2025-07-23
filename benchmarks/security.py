@@ -1,4 +1,5 @@
 import subprocess
+import tempfile
 
 SUPPORTED_LANGUAGES = {"python"}
 import json
@@ -62,30 +63,34 @@ def _assess_static_security(codebase_path: str) -> tuple[float, List[str], Dict[
     
     # --- Bandit Scan ---
     bandit_score = 10.0
-    try:
-        command = ["bandit", "-r", codebase_path, "-f", "json"]
-        result = subprocess.run(command, capture_output=True, text=True, check=False)
-        report = json.loads(result.stdout)
-        
-        if report and "results" in report:
-            findings = report["results"]
-            high = sum(1 for f in findings if f["issue_severity"] == "HIGH")
-            medium = sum(1 for f in findings if f["issue_severity"] == "MEDIUM")
-            low = sum(1 for f in findings if f["issue_severity"] == "LOW")
-            
-            details.append(f"[Bandit] High: {high}, Medium: {medium}, Low: {low}")
-            metrics["bandit_high"] = high
-            metrics["bandit_medium"] = medium
-            metrics["bandit_low"] = low
-
-            for f in findings[:10]:  # Limit to first 10
-                details.append(f"  - {f['issue_text']} ({f['filename']}:{f['line_number']})")
-
-            score_deduction = (high * 3) + (medium * 1) + (low * 0.5)
-            bandit_score = max(0.0, 10.0 - score_deduction)
-    except (json.JSONDecodeError, FileNotFoundError):
-        details.append("[Bandit] Could not run bandit.")
+    if not os.path.isdir(codebase_path):
+        details.append("Invalid codebase path for Bandit scan")
         bandit_score = 0.0
+    else:
+        try:
+            command = ["bandit", "-r", codebase_path, "-f", "json"]
+            result = subprocess.run(command, capture_output=True, text=True, check=False)
+            report = json.loads(result.stdout)
+            
+            if report and "results" in report:
+                findings = report["results"]
+                high = sum(1 for f in findings if f["issue_severity"] == "HIGH")
+                medium = sum(1 for f in findings if f["issue_severity"] == "MEDIUM")
+                low = sum(1 for f in findings if f["issue_severity"] == "LOW")
+                
+                details.append(f"[Bandit] High: {high}, Medium: {medium}, Low: {low}")
+                metrics["bandit_high"] = high
+                metrics["bandit_medium"] = medium
+                metrics["bandit_low"] = low
+
+                for f in findings[:10]:  # Limit to first 10
+                    details.append(f"  - {f['issue_text']} ({f['filename']}:{f['line_number']})")
+
+                score_deduction = (high * 3) + (medium * 1) + (low * 0.5)
+                bandit_score = max(0.0, 10.0 - score_deduction)
+        except (json.JSONDecodeError, FileNotFoundError):
+            details.append("[Bandit] Could not run bandit.")
+            bandit_score = 0.0
 
     # --- Safety Scan ---
     safety_score = 10.0
@@ -126,13 +131,20 @@ def _assess_dynamic_security(web_app_url: str) -> tuple[float, List[str], Dict[s
     
     # Check if ZAP is available
     try:
+        if not web_app_url.startswith('http'):
+            details.append("Invalid URL for ZAP scan")
+            dynamic_score = 0.0
+            return dynamic_score, details, metrics
+        
+        temp_file = tempfile.NamedTemporaryFile(delete=False, suffix='.json').name
+        
         # Try ZAP baseline scan (quick passive scan)
         command = [
             "docker", "run", "--rm", "-t",
             "owasp/zap2docker-stable",
             "zap-baseline.py",
             "-t", web_app_url,
-            "-J", "/tmp/zap-report.json"
+            "-J", temp_file
         ]
         
         details.append(f"[ZAP] Running baseline scan on {web_app_url}")
@@ -173,9 +185,9 @@ def _assess_dynamic_security(web_app_url: str) -> tuple[float, List[str], Dict[s
     except FileNotFoundError:
         details.append("[ZAP] Docker/ZAP not available. Install: docker pull owasp/zap2docker-stable")
         dynamic_score = 5.0  # Neutral if tool unavailable
-    except Exception as e:
+    except subprocess.SubprocessError as e:
         details.append(f"[ZAP] Error: {e}")
         dynamic_score = 3.0
     
     metrics["dynamic_score"] = dynamic_score
-    return dynamic_score, details, metrics 
+    return dynamic_score, details, metrics
