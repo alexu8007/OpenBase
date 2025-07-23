@@ -1,4 +1,3 @@
-
 import random
 import secrets
 import uuid
@@ -34,7 +33,7 @@ def _initialize_game_state() -> Tuple[List[Snake], List[Dict[str, int]], int]:
         - An empty list for food positions.
         - The initial turn count (0).
     """
-    initialized_snakes = [Snake(loc["x"], loc["y"], uuid.uuid1()) for loc in SPAWN_LOCS]
+    initialized_snakes = (Snake(loc["x"], loc["y"], uuid.uuid1()) for loc in SPAWN_LOCS)
     initialized_food: List[Dict[str, int]] = []
     initial_turn = 0
     return initialized_snakes, initialized_food, initial_turn
@@ -71,12 +70,12 @@ def _is_valid_food_position(pos: Dict[str, int], snakes: List[Snake]) -> bool:
     Returns:
         True if the position is valid, False otherwise.
     """
-    for snake in snakes:
-        if not snake.is_dead:
-            for piece in snake.tail:
-                if pos["x"] == piece["x"] and pos["y"] == piece["y"]:
-                    return False
-    return True
+    return not any(
+        piece["x"] == pos["x"] and piece["y"] == pos["y"]
+        for snake in snakes
+        if not snake.is_dead
+        for piece in snake.tail
+    )
 
 def _spawn_random_food(food_list: List[Dict[str, int]], snakes: List[Snake]) -> None:
     """
@@ -190,10 +189,10 @@ def run_game_loop() -> Tuple[int, List[int]]:
 
 # --- Main execution block ---
 
-for x in range(NUM_BENCHMARKS):
-    print(f"Benchmarking game {x+1} / {NUM_BENCHMARKS}")
+for i, _ in enumerate(range(NUM_BENCHMARKS)):
+    print(' '.join(['Benchmarking', 'game', str(i+1), '/', str(NUM_BENCHMARKS)]))
     final_turn, final_snake_lengths = run_game_loop()
-    print(f"\tturns: {final_turn}, lengths: {final_snake_lengths}")
+    print(' '.join(['\tturns:', str(final_turn), 'lengths:', str(final_snake_lengths)]))
     benchmark_data.append({
         "turns": final_turn,
         "lengths": final_snake_lengths
