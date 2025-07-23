@@ -3,6 +3,35 @@ import ast
 SUPPORTED_LANGUAGES = {"python"}
 from .utils import get_python_files, parse_file
 
+class RobustnessVisitor(ast.NodeVisitor):
+    def __init__(self, file_path):
+        self.file_path = file_path
+        self.has_logging = False
+        self.total_handlers = 0
+        self.good_handlers = 0
+        self.details = []
+
+    def visit_Import(self, node):
+        if any(alias.name == "logging" for alias in node.names):
+            self.has_logging = True
+        self.generic_visit(node)
+
+    def visit_ImportFrom(self, node):
+        if node.module == "logging":
+            self.has_logging = True
+        self.generic_visit(node)
+
+    def visit_ExceptHandler(self, node):
+        self.total_handlers += 1
+        if node.type:
+            if isinstance(node.type, ast.Name) and node.type.id == 'Exception':
+                self.details.append(''.join(["Generic 'except Exception' used in ", self.file_path, ":", str(node.lineno)]))
+            else:
+                self.good_handlers += 1
+        else:
+            self.details.append(''.join(["Bare 'except:' used in ", self.file_path, ":", str(node.lineno)]))
+        self.generic_visit(node)
+
 def assess_robustness(codebase_path: str):
     """
     Assesses the robustness of a codebase.
@@ -23,21 +52,13 @@ def assess_robustness(codebase_path: str):
         if not tree:
             continue
         
-        for node in ast.walk(tree):
-            if isinstance(node, ast.Import) and any(alias.name == "logging" for alias in node.names):
-                uses_logging = True
-            if isinstance(node, ast.ImportFrom) and node.module == "logging":
-                uses_logging = True
-
-            if isinstance(node, ast.ExceptHandler):
-                total_handlers += 1
-                if node.type:
-                    if isinstance(node.type, ast.Name) and node.type.id == 'Exception':
-                        details.append(f"Generic 'except Exception' used in {file_path}:{node.lineno}")
-                    else:
-                        good_handlers += 1
-                else:
-                    details.append(f"Bare 'except:' used in {file_path}:{node.lineno}")
+        visitor = RobustnessVisitor(file_path)
+        visitor.visit(tree)
+        
+        uses_logging = uses_logging or visitor.has_logging
+        total_handlers += visitor.total_handlers
+        good_handlers += visitor.good_handlers
+        details.extend(visitor.details)
 
     if uses_logging:
         details.insert(0, "Codebase appears to use the 'logging' module.")
@@ -55,4 +76,4 @@ def assess_robustness(codebase_path: str):
     
     details.insert(1, f"Error handling quality: {handler_quality*100:.2f}% ({good_handlers}/{total_handlers} specific handlers)")
 
-    return min(10.0, max(0.0, handler_score)), details 
+    return min(10.0, max(0.0, handler_score)), details
