@@ -1,4 +1,3 @@
-
 from flask import Flask, jsonify, request, Response
 
 from snake import Snake
@@ -59,8 +58,8 @@ def move() -> Response:
     """
     content: dict = request.json
     id: str = content["you"]["id"]
-    snakes: list[dict] = [x for x in content["board"]["snakes"]]
-    food: list[dict] = [x for x in content["board"]["food"]]
+    snakes: list[dict] = (x for x in content["board"]["snakes"])
+    food: list[dict] = (x for x in content["board"]["food"])
     return jsonify({
         "move": DIRS[snake.update(id, snakes, food)],
         "shout": "In the fog of great chaos shines the light of great opportunity."
