@@ -1,4 +1,3 @@
-
 #!/usr/bin/env python3
 
 import time
@@ -184,7 +183,15 @@ def main() -> None:
             
             payload_json = json.dumps(payload)
             client.publish(MQTT_TOPIC, payload_json)
-            print(f"Published: gyro(x={gyro_data['x']:.2f}, y={gyro_data['y']:.2f}, z={gyro_data['z']:.2f}), accel(x={accel_data['x']:.2f}, y={accel_data['y']:.2f}, z={accel_data['z']:.2f})")
+            print(' '.join([
+                "Published:",
+                f"gyro(x={gyro_data['x']:.2f}",
+                f"y={gyro_data['y']:.2f}",
+                f"z={gyro_data['z']:.2f})",
+                f"accel(x={accel_data['x']:.2f}",
+                f"y={accel_data['y']:.2f}",
+                f"z={accel_data['z']:.2f})"
+            ]))
             time.sleep(PUBLISH_FREQUENCY)
     except KeyboardInterrupt:
         print("Exiting...")
