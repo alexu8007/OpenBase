@@ -1,4 +1,3 @@
-
 import msgpack
 import numpy as np
 from typing import List, Dict, Any
@@ -64,16 +63,12 @@ def process_and_save_source_data(source_index: int, total_sources: int) -> None:
     with open(input_filepath, 'rb') as f:
         data: List[Dict[str, Any]] = msgpack.load(f)
 
-    for dir_idx in range(3):
-        preprocessed_frames: List[Dict[str, Any]] = []
-        for frame in data:
-            # The original code had a loop 'for x in range(dir_idx+1)'
-            # which applied rotations to a 'rotated_frame' variable,
-            # but then discarded its result and appended 'rotateFrame(frame)'
-            # (a single rotation of the original frame) to 'preprocessed'.
-            # We replicate this exact (potentially unintended) behavior.
-            preprocessed_frames.append(rotate_frame(frame))
+    # Optimize nested loop by computing preprocessed_frames once
+    preprocessed_frames: List[Dict[str, Any]] = []
+    for idx, frame in enumerate(data):  # Replaced simple range loop with enumerate
+        preprocessed_frames.append(rotate_frame(frame))
             
+    for dir_idx in enumerate(range(3)):  # Replaced simple range loop with enumerate
         print(f"Source {source_index}, Rotation {dir_idx}, Number of frames {len(preprocessed_frames)}")
         
         output_filepath: str = 'data/{}.msgpack'.format(total_sources + source_index * 3 + dir_idx)
@@ -86,7 +81,7 @@ def main() -> None:
     It iterates through defined data sources, loads their frames,
     applies rotations, and saves the results to new files.
     """
-    for source_idx in range(SOURCES):
+    for source_idx in enumerate(range(SOURCES)):  # Replaced simple range loop with enumerate
         process_and_save_source_data(source_idx, SOURCES)
 
 if __name__ == "__main__":
