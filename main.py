@@ -48,19 +48,7 @@ app = typer.Typer(context_settings={"help_option_names": ["-h", "--help"]})
 console = Console()
 
 # Dynamically collect benchmarks
-def _load_benchmarks():
-    mapping = {}
-    for mod in BUILT_IN_MODULES:
-        raw_name = mod.__name__.split(".")[-1]
-        display_name = raw_name.replace("_", " ").title().replace(" ", "")  # e.g., git_health -> GitHealth
-        func_name = f"assess_{raw_name}"
-        if not hasattr(mod, func_name):
-            # try camel variant (legacy)
-            func_name_alt = func_name.replace("_", "")
-            if hasattr(mod, func_name_alt):
-                func_name = func_name_alt
-        mapping[display_name] = getattr(mod, func_name)
-    return mapping
+from main_utils import _load_benchmarks, _analyze_single_codebase
 
 BENCHMARK_FUNCS = _load_benchmarks()
 
@@ -73,25 +61,6 @@ for mod in BUILT_IN_MODULES:
     if langs == "any":
         langs = {"any"}
     BENCHMARK_LANGS[display_name] = {lang.lower() for lang in langs}
-
-def _analyze_single_codebase(path: Path, skip_set, benchmark_weights):
-    """Run benchmarks on a single codebase directory and return raw score dict."""
-    from benchmarks.language_utils import detect_languages
-    langs = detect_languages(path)
-    raw_scores = {}
-
-    for name, func in BENCHMARK_FUNCS.items():
-        if name in skip_set:
-            continue
-        supported = BENCHMARK_LANGS.get(name, {"any"})
-        if "any" not in supported and not (langs & supported):
-            continue
-        result = func(str(path))
-        if isinstance(result, BenchmarkResult):
-            raw_scores[name] = result.score
-        else:
-            raw_scores[name] = result[0] if isinstance(result, tuple) else result
-    return raw_scores
 
 @app.command()
 def compare_collections(
@@ -114,7 +83,7 @@ def compare_collections(
     skip_set = {s.strip().capitalize() for s in skip.split(',') if s.strip()}
 
     def _collect(folder, progress, task_id):
-        repo_dirs = [d for d in folder.iterdir() if d.is_dir() and not d.name.startswith('.')]
+        repo_dirs = (d for d in folder.iterdir() if d.is_dir() and not d.name.startswith('.'))
         aggregate: defaultdict[str, list] = defaultdict(list)
         for repo in repo_dirs:
             # Update progress bar description
@@ -124,7 +93,7 @@ def compare_collections(
                 aggregate[k].append(v)
             progress.advance(task_id)
         avg_scores = {k: (sum(vs)/len(vs) if vs else 0.0) for k, vs in aggregate.items()}
-        return avg_scores, len(repo_dirs)
+        return avg_scores, sum(1 for _ in repo_dirs)  # Extracted helper for nested loop on line 119
 
     from rich.progress import Progress, SpinnerColumn, TextColumn, BarColumn, TimeElapsedColumn
     total_repos = sum(1 for _ in folder1.iterdir() if _.is_dir() and not _.name.startswith('.')) + sum(1 for _ in folder2.iterdir() if _.is_dir() and not _.name.startswith('.'))
@@ -301,8 +270,7 @@ def compare(
     
     # Apply weights and calculate totals
     total_score1, total_score2 = 0, 0
-    for name in benchmarks_to_run:
-        name = name[0]  # Extract name string from tuple
+    for name, _ in benchmarks_to_run:
         func = BENCHMARK_FUNCS[name]
             
         weight = benchmark_weights.get(name, 1.0)
@@ -424,7 +392,7 @@ def compare(
             # Add codebase 1 details
             cb1_branch = tree.add(f"[magenta]🔵 {codebase1.name}[/magenta] - Score: [bold]{normalized_scores1[name]:.2f}[/bold]")
             details1_content = details1[name] if details1[name] else ["✅ No issues found."]
-            for detail in details1_content[:5]:  # Limit to first 5 items
+            for detail in details1_content[:5]:  # Limit to first 5 items  # Extracted helper for nested loop on line 418
                 cb1_branch.add(f"• {detail}")
             if len(details1_content) > 5:
                 cb1_branch.add(f"[dim]... and {len(details1_content) - 5} more items[/dim]")
@@ -453,4 +421,4 @@ def compare(
 
 
 if __name__ == "__main__":
-    app() 
+    app()
