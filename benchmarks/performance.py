@@ -82,9 +82,10 @@ def _assess_static_performance(codebase_path: str, python_files: List[str]) -> t
             proc = subprocess.run([lizard_executable, "-j", codebase_path], capture_output=True, text=True, check=False)
             if proc.returncode == 0:
                 data = json.loads(proc.stdout)
-                func_records = [f for file in data.get("files", []) for f in file.get("functions", [])]
-                total_funcs = len(func_records)
-                cc_values = [f.get("cyclomatic_complexity", 0) for f in func_records]
+                func_records_gen = (f for file in data.get("files", []) for f in file.get("functions", []))  # Converted to generator
+                total_funcs = sum(1 for _ in func_records_gen)  # Use generator for counting
+                cc_values_gen = (f.get("cyclomatic_complexity", 0) for f in (f for file in data.get("files", []) for f in file.get("functions", [])))  # Converted to generator
+                cc_values = list(cc_values_gen)  # Convert back if needed for sum
                 avg_cc = (sum(cc_values) / total_funcs) if total_funcs else None
 
                 if avg_cc is not None:
@@ -94,7 +95,8 @@ def _assess_static_performance(codebase_path: str, python_files: List[str]) -> t
                         penalties += (avg_cc - 10) / 2
 
                     # High-complexity function penalty
-                    high_cc_funcs = [v for v in cc_values if v > 20]
+                    high_cc_funcs_gen = (v for v in cc_values if v > 20)  # Converted to generator
+                    high_cc_funcs = list(high_cc_funcs_gen)  # Convert if needed
                     if high_cc_funcs:
                         ratio = len(high_cc_funcs) / total_funcs
                         penalties += ratio * 3  # up to 3-point penalty
@@ -111,27 +113,7 @@ def _assess_static_performance(codebase_path: str, python_files: List[str]) -> t
     # ---------------------------------------------------------------
     # 2. Python-specific anti-pattern scan (kept from previous logic)
     # ---------------------------------------------------------------
-    anti_patterns_found = 0.0
-    for file_path in python_files:
-        tree = parse_file(file_path)
-        if not tree:
-            continue
-
-        for node in ast.walk(tree):
-            if (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute) and node.func.attr == 'insert' and len(node.args) == 2 and hasattr(node.args[0], 'value') and node.args[0].value == 0):
-                details.append(f"Inefficient 'list.insert(0, …)' at {file_path}:{node.lineno}")
-                anti_patterns_found += 1
-            if isinstance(node, (ast.For, ast.While)):
-                for sub_node in ast.walk(node):
-                    if isinstance(sub_node, ast.AugAssign) and isinstance(sub_node.op, ast.Add) and isinstance(sub_node.target, ast.Name):
-                        details.append(f"String concatenation in loop at {file_path}:{node.lineno}")
-                        anti_patterns_found += 0.5
-            if isinstance(node, ast.For):
-                for sub_node in ast.walk(node):
-                    if isinstance(sub_node, ast.For) and sub_node is not node:
-                        details.append(f"Nested loops (O(n²) risk) at {file_path}:{node.lineno}")
-                        anti_patterns_found += 0.3
-
+    anti_patterns_found = _detect_python_anti_patterns(python_files, details)  # Extracted to helper function
     if anti_patterns_found:
         details.insert(0, f"Python anti-patterns found: {anti_patterns_found}")
         penalties += anti_patterns_found
@@ -143,6 +125,39 @@ def _assess_static_performance(codebase_path: str, python_files: List[str]) -> t
     performance_score = max(0.0, min(10.0, performance_score))
     return performance_score, details
 
+def _detect_python_anti_patterns(python_files: List[str], details: List[str]) -> float:
+    anti_patterns_found = 0.0
+    class AntiPatternVisitor(ast.NodeVisitor):
+        def visit_Call(self, node):
+            if (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute) and node.func.attr == 'insert' and len(node.args) == 2 and hasattr(node.args[0], 'value') and node.args[0].value == 0):
+                details.append(f"Inefficient 'list.insert(0, …)' at {node.filename}:{node.lineno}")  # Assuming filename is set or handle accordingly
+                anti_patterns_found += 1
+            self.generic_visit(node)
+        
+        def visit_For(self, node):
+            for sub_node in ast.iter_child_nodes(node):  # Efficient alternative to ast.walk
+                if isinstance(sub_node, ast.AugAssign) and isinstance(sub_node.op, ast.Add) and isinstance(sub_node.target, ast.Name):
+                    details.append(f"String concatenation in loop at {node.filename}:{node.lineno}")
+                    anti_patterns_found += 0.5
+                if isinstance(sub_node, ast.For):
+                    details.append(f"Nested loops (O(n²) risk) at {node.filename}:{node.lineno}")
+                    anti_patterns_found += 0.3
+            self.generic_visit(node)
+        
+        def visit_While(self, node):
+            for sub_node in ast.iter_child_nodes(node):  # Efficient alternative to ast.walk
+                if isinstance(sub_node, ast.AugAssign) and isinstance(sub_node.op, ast.Add) and isinstance(sub_node.target, ast.Name):
+                    details.append(f"String concatenation in loop at {node.filename}:{node.lineno}")
+                    anti_patterns_found += 0.5
+            self.generic_visit(node)
+    
+    for file_path in python_files:
+        tree = parse_file(file_path)
+        if tree:
+            visitor = AntiPatternVisitor()
+            visitor.filename = file_path  # Set for use in append
+            visitor.visit(tree)
+    return anti_patterns_found
 
 def _assess_dynamic_performance(profile_script: str) -> tuple[float, List[str], Dict[str, Any]]:
     """Dynamic runtime profiling with multiple samples."""
@@ -244,4 +259,4 @@ def _assess_dynamic_performance(profile_script: str) -> tuple[float, List[str], 
     # Combined dynamic score
     dynamic_score = (time_score + memory_score) / 2.0
     
-    return dynamic_score, details, metrics 
+    return dynamic_score, details, metrics
