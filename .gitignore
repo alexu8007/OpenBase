@@ -1,9 +1,12 @@
+# Ignore environment files
 *.env
-.env    
+.env
 
-.venv
+# Ignore Python virtual environments
+.venv/
 
-./codebaseA
-./codebaseB
-./repos
-/repos
+# Ignore project directories
+codebaseA/
+codebaseB/
+repos/
+reports/
