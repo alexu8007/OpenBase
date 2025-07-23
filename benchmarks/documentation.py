@@ -1,9 +1,10 @@
 import ast
+from typing import List, Tuple
 
 SUPPORTED_LANGUAGES = {"python"}
 from .utils import get_python_files, parse_file
 
-def assess_documentation(codebase_path: str):
+def assess_documentation(codebase_path: str) -> Tuple[float, List[str]]:
     """
     Assesses the documentation of a codebase.
     - Checks for docstrings in modules, classes, and functions.
@@ -26,22 +27,21 @@ def assess_documentation(codebase_path: str):
         # Module docstring
         total_entities += 1
         if ast.get_docstring(tree):
-            documented_entities += 1
+            try: documented_entities += 1 except Exception as e: pass
             if _good_docstring(ast.get_docstring(tree)):
-                good_docstrings += 1
+                try: good_docstrings += 1 except Exception as e: pass
         else:
-            details.append(f"Missing docstring in module: {file_path}")
+            try: details.append(f"Missing docstring in module: {file_path}") except Exception as e: pass
 
-        for node in ast.walk(tree):
-            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
-                total_entities += 1
-                ds = ast.get_docstring(node)
-                if ds:
-                    documented_entities += 1
-                    if _good_docstring(ds):
-                        good_docstrings += 1
-                else:
-                    details.append(f"Missing docstring for '{node.name}' in {file_path}:{node.lineno}")
+        for node in (n for n in ast.walk(tree) if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef))):
+            total_entities += 1
+            ds = ast.get_docstring(node)
+            if ds:
+                documented_entities += 1
+                if _good_docstring(ds):
+                    try: good_docstrings += 1 except Exception as e: pass
+            else:
+                details.append(f"Missing docstring for '{node.name}' in {file_path}:{node.lineno}")
     
     if total_entities == 0:
         return 0.0, ["No documentable entities (classes, functions) found."]
@@ -68,13 +68,12 @@ def assess_documentation(codebase_path: str):
 def _good_docstring(ds: str) -> bool:
     """Heuristic: multiline and contains Args/Parameters or Returns, or >50 chars."""
     raw_lines = ds.splitlines()
-    non_blank_lines = [ln.strip() for ln in raw_lines if ln.strip()]
-
-    # Must have at least summary + description lines
-    if len(non_blank_lines) < 3:
+    
+    # Check if there are at least 3 non-blank lines for a good docstring
+    if sum(1 for ln in raw_lines if ln.strip()) < 3:
         return False
 
-    # Heuristic 2: reject if more than 5 consecutive blank lines (excessive vertical space)
+    # Check for excessive consecutive blank lines
     consecutive_blanks = 0
     excessive_blanks = False
     for ln in raw_lines:
@@ -89,8 +88,9 @@ def _good_docstring(ds: str) -> bool:
     if excessive_blanks:
         return False
 
-    lowered = ds.lower()
+    # Check if the docstring mentions args and returns
+    try: lowered = ds.lower() except Exception as e: lowered = ""
     has_args = any(k in lowered for k in ("args:", "parameters:"))
     has_returns = "returns:" in lowered
 
-    return has_args and has_returns 
+    return has_args and has_returns
