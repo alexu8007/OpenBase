@@ -1,3 +1,5 @@
+"""Module for assessing codebase readability."""
+
 from radon.visitors import ComplexityVisitor
 
 # Readability analysis is currently Python-specific
@@ -26,7 +28,7 @@ def assess_readability(codebase_path: str):
             visitor = ComplexityVisitor.from_code(code)
             for f in visitor.functions:
                 if f.complexity > 10:
-                    details.append(f"High complexity ({f.complexity}) in function '{f.name}' at {file_path}:{f.lineno}")
+                    details.append(' '.join(["High", "complexity", "(", str(f.complexity), ")", "in", "function", "'", str(f.name), "'", "at", str(file_path) + ":" + str(f.lineno)]))
                 total_complexity += f.complexity
                 total_functions += 1
         except Exception:
@@ -45,4 +47,4 @@ def assess_readability(codebase_path: str):
     
     readability_score = (0.6 * complexity_score + 0.4 * pep8_score)
     
-    return min(10.0, max(0.0, readability_score)), details 
+    return min(10.0, max(0.0, readability_score)), details
