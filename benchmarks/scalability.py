@@ -1,5 +1,6 @@
 import ast
 import os
+import logging
 
 SUPPORTED_LANGUAGES = {"any"}
 import asyncio
@@ -32,11 +33,13 @@ def assess_scalability(codebase_path: str):
     
     caching_keywords = ["redis", "memcached", "celery", "cache", "cachetools", "cachetools.cached"]
 
+    # Iterate through each Python file to analyze AST
     for file_path in python_files:
         tree = parse_file(file_path)
         if not tree:
             continue
 
+        # Process each node in the AST of the file
         for node in ast.walk(tree):
             if isinstance(node, ast.Import):
                 for alias in node.names:
@@ -111,8 +114,9 @@ def assess_scalability(codebase_path: str):
                 try:
                     with open(file_path, "r", encoding="utf-8", errors="ignore") as f:
                         content = f.read()
-                except Exception:
-                    continue
+                except Exception as e:
+                    logging.error(f"Error reading file {file_path}: {e}")
+                    continue  # Skip this file after logging
 
                 # Truncate very large files to avoid blowing the context window
                 if len(content) > 2000:
@@ -121,12 +125,11 @@ def assess_scalability(codebase_path: str):
                 if snippet_chars + len(content) > MAX_CHARS:
                     break
 
-                snippets.append(f"FILE: {file_path}\n```\n{content}\n```\n")
+                snippets.append(f"FILE: {file_path}\n\n{content}\n\n")
                 snippet_chars += len(content)
 
             code_corpus = "\n".join(snippets)
-
-            full_prompt = prompt + "\nHere are code excerpts:\n" + code_corpus
+            full_prompt = ''.join([prompt, "\nHere are code excerpts:\n", code_corpus])
 
             rsp = model.generate_content(full_prompt, generation_config={"temperature": 0.0})
             first_token = rsp.text.strip().split()[0]
@@ -144,4 +147,4 @@ def assess_scalability(codebase_path: str):
             details.append("GEMINI_API_KEY environment variable not set; skipping Gemini evaluation.")
 
     final_score = llm_score_0_to_10 if llm_score_0_to_10 is not None else min(10.0, max(0.0, score))
-    return final_score, details 
+    return final_score, details
