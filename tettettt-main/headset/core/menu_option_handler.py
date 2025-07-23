@@ -29,12 +29,8 @@ class MenuOptionHandler:
         num_detections = data.get('num_detections', 0)
         detections = data.get('detections', [])
         if num_detections > 0 and detections:
-            message = f"Detected {num_detections} objects: "
-            for detection in detections:
-                label = detection.get('label', 'unknown')
-                distance = detection.get('distance', 0)
-                confidence = detection.get('confidence', 0)
-                message += f"{label} with confidence {confidence:.2f}, {distance:.1f} meters away, "
+            detection_strings = [f"{detection['label']} with confidence {detection['confidence']:.2f}, {detection['distance']:.1f} meters away" for detection in detections]
+            message = f"Detected {num_detections} objects: " + ', '.join(detection_strings)
             message = message.rstrip(", ")
             self.menu_system.send_tts_configured(message)
         else:
@@ -286,15 +282,17 @@ class MenuOptionHandler:
             data = response.json()
             detections = data.get('detections', [])
             
-            sign_detections = [d for d in detections if d.get('label') == 'general_sign']
+            sign_detections = (d for d in detections if d.get('label') == 'general_sign')
             
-            if not sign_detections:
+            sign_detections_list = list(sign_detections)  # Convert to list for further use
+            
+            if not sign_detections_list:
                 self.menu_system.send_tts_configured("No signs detected. Please point the camera at a sign.")
                 return
             
             self.menu_system.send_tts_configured("Sign detected. Processing...")
             
-            sign = sign_detections[0]
+            sign = sign_detections_list[0]
             bbox = sign.get('bbox', {})
             
             img_data = base64.b64decode(data.get('detection_image', ''))
@@ -425,10 +423,9 @@ class MenuOptionHandler:
                 accel_y = accel.get("y", 0)
                 accel_z = accel.get("z", 0)
 
-                message = (
-                    f"Gyro values are X: {gyro_x:.2f}, Y: {gyro_y:.2f}, Z: {gyro_z:.2f}. "
-                    f"Acceleration values are X: {accel_x:.2f}, Y: {accel_y:.2f}, Z: {accel_z:.2f}."
-                )
+                gyro_values = [f"Gyro values are X: {gyro_x:.2f}", f"Y: {gyro_y:.2f}", f"Z: {gyro_z:.2f}"]
+                accel_values = [f"Acceleration values are X: {accel_x:.2f}", f"Y: {accel_y:.2f}", f"Z: {accel_z:.2f}"]
+                message = ' '.join(gyro_values + accel_values) + "."
                 self.menu_system.send_tts_configured(message)
             except Exception as e:
                 self.menu_system.send_tts_configured(f"Error processing gyro data: {str(e)}")
