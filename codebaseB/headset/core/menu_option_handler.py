@@ -1,4 +1,3 @@
-
 import asyncio
 import os
 import paho.mqtt.client as mqtt
@@ -12,8 +11,8 @@ from PIL import Image
 import base64
 from util import camera_detections, zero_pyr_cane, zero_pyr_headset, vibrate_cane_motors
 import config
-from menu_handler_utils import get_object_positions  # Imported after splitting
-from menu_option_processor import narrate_current_object, right_button_callback, left_button_callback  # Imported after splitting
+from menu_option_utils import get_object_positions  # Import utility function for object positions
+from menu_option_processor import narrate_current_object  # Import utility function for narrating objects
 
 SPEAKER_API_URL = "http://localhost:5001"
 
@@ -55,7 +54,7 @@ class MenuOptionHandler:
 
     def track_object(self) -> None:
         """
-        Handle object tracking functionality.
+        Handle object tracking functionality, including object selection and angle calculations.
         """
         response = camera_detections()
         if response.status_code != 200:
@@ -76,8 +75,8 @@ class MenuOptionHandler:
         current_index: int = 0
         selected_object: dict = None
 
-        # Complex logic starts here (cognitive complexity >15)
-        # Begin object selection and tracking callbacks
+        # Complex logic for object selection and tracking (cognitive complexity >15)
+        # This section handles cycling through detections and calculating angles for tracking
         narrate_current_object(detections, current_index, self.menu_system)  # Call from new file
         def inner_right_button_callback():
             nonlocal current_index
@@ -148,7 +147,7 @@ class MenuOptionHandler:
                 self.menu_system.send_tts_configured(
                     f"Object is {distance:.1f} meters away, {magnitude:.1f} degrees {direction_desc}."
                 )
-                # End of angle and displacement calculations
+                # End of angle and displacement calculations for object tracking
                 
                 def cancel_tracking_callback():
                     nonlocal tracking
@@ -168,7 +167,7 @@ class MenuOptionHandler:
                     if abs(cane_yaw - horizontal_angle) <= 10:
                         vibrate_cane_motors(left_duration=0.5, right_duration=0.5)
                     sleep(0.5)  # Add a delay to avoid excessive vibrations
-        # Complex logic ends
+        # End of complex logic for object tracking
 
         try:
             self.menu_system.button_state.set_right_press_callback(inner_right_button_callback)
@@ -184,7 +183,7 @@ class MenuOptionHandler:
 
     def object_avoidance(self) -> None:
         """
-        Handle object avoidance mode.
+        Handle object avoidance mode, including vibration based on object angles.
         """
         response = camera_detections()
         if response.status_code != 200:
@@ -223,7 +222,7 @@ class MenuOptionHandler:
         
         while avoidance_active:
             try:
-                objects: list = get_object_positions()  # Call from new file
+                objects: list = get_object_positions()  # Call from new file, retrieves object positions
                 headset_pyr = self.menu_system.headset_pyr_state.get_pyr_state()
                 cane_pyr = self.menu_system.cane_pyr_state.get_pyr_state()
                 cane_yaw: float = cane_pyr.get('yaw', 0)
@@ -261,7 +260,7 @@ class MenuOptionHandler:
     
     def scan_sign(self) -> None:
         """
-        Scan and narrate text from a detected sign.
+        Scan and narrate text from a detected sign using OCR.
         """
         try:
             response = camera_detections()
@@ -272,9 +271,8 @@ class MenuOptionHandler:
             data = response.json()
             detections: list = data.get('detections', [])
             
-            # Replace list comprehension with generator for memory efficiency
-            sign_detections_gen = (d for d in detections if d.get('label') == 'general_sign')
-            sign_detections: list = list(sign_detections_gen)  # Convert to list if needed
+            sign_detections_gen = (d for d in detections if d.get('label') == 'general_sign')  # Generator for memory efficiency
+            sign_detections: list = list(sign_detections_gen)
             
             if not sign_detections:
                 self.menu_system.send_tts_configured("No signs detected. Please point the camera at a sign.")
@@ -341,7 +339,6 @@ class MenuOptionHandler:
         except Exception as e:
             self.menu_system.send_tts_configured(f"Error scanning sign: {str(e)}")
     
-    # Other methods remain as they are, with docstrings and type hints added
     def calibrate_gyros(self) -> None:
         """
         Calibrate the gyroscopes for headset and smart cane.
