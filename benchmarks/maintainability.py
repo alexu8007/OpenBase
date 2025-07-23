@@ -4,6 +4,18 @@ SUPPORTED_LANGUAGES = {"python"}
 from .utils import get_python_files
 from .stats_utils import BenchmarkResult, calculate_confidence_interval, adjust_score_for_size, get_codebase_size_bucket
 
+def process_file(file_path):
+    with open(file_path, 'r', encoding='utf-8') as f:
+        code = f.read()
+    if code.strip():
+        try:
+            mi = mi_visit(code, multi=True)
+            return mi, None
+        except Exception:
+            return None, f"Could not parse {file_path}"
+    else:
+        return None, None
+
 def assess_maintainability(codebase_path: str) -> BenchmarkResult:
     """
     Assesses the maintainability of a codebase using the Maintainability Index (MI).
@@ -18,16 +30,13 @@ def assess_maintainability(codebase_path: str) -> BenchmarkResult:
     raw_metrics = {}
     
     for file_path in python_files:
-        with open(file_path, 'r', encoding='utf-8') as f:
-            code = f.read()
-        if code.strip():
-            try:
-                mi = mi_visit(code, multi=True)
-                file_mis.append(mi)
-                if mi < 40:
-                    details.append(f"Low maintainability index ({mi:.2f}) in {file_path}")
-            except Exception:
-                details.append(f"Could not parse {file_path}")
+        mi, message = process_file(file_path)
+        if mi is not None:
+            file_mis.append(mi)
+            if mi < 40:
+                details.append(f"Low maintainability index ({mi:.2f}) in {file_path}")
+        if message:
+            details.append(message)
 
     if not file_mis:
         return BenchmarkResult(0.0, ["No parseable Python files found."])
@@ -56,4 +65,4 @@ def assess_maintainability(codebase_path: str) -> BenchmarkResult:
         details=details,
         raw_metrics=raw_metrics,
         confidence_interval=(confidence_interval[0]/10.0, confidence_interval[1]/10.0)  # Scale to 0-10
-    ) 
+    )
