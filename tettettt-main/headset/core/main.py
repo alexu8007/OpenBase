@@ -196,7 +196,7 @@ class MenuSystem:
             vibrate_cane_motors(left_duration=0.1, right_duration=0.1)
             
             if previous_menu != self.current_menu:
-                menu_name = f"{self.current_menu} menu"
+                menu_name = ''.join([self.current_menu, " menu"])
                 self.send_tts_configured(menu_name)
                 time.sleep(1)
                 self.announce_current_option()
