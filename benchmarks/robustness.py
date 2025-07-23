@@ -23,6 +23,7 @@ def assess_robustness(codebase_path: str):
         if not tree:
             continue
         
+        # Nested loop to iterate through all nodes in the AST tree
         for node in ast.walk(tree):
             if isinstance(node, ast.Import) and any(alias.name == "logging" for alias in node.names):
                 uses_logging = True
@@ -33,11 +34,11 @@ def assess_robustness(codebase_path: str):
                 total_handlers += 1
                 if node.type:
                     if isinstance(node.type, ast.Name) and node.type.id == 'Exception':
-                        details.append(f"Generic 'except Exception' used in {file_path}:{node.lineno}")
+                        details.append(''.join(["Generic 'except Exception' used in ", file_path, ":", str(node.lineno)]))
                     else:
                         good_handlers += 1
                 else:
-                    details.append(f"Bare 'except:' used in {file_path}:{node.lineno}")
+                    details.append(''.join(["Bare 'except:' used in ", file_path, ":", str(node.lineno)]))
 
     if uses_logging:
         details.insert(0, "Codebase appears to use the 'logging' module.")
@@ -55,4 +56,4 @@ def assess_robustness(codebase_path: str):
     
     details.insert(1, f"Error handling quality: {handler_quality*100:.2f}% ({good_handlers}/{total_handlers} specific handlers)")
 
-    return min(10.0, max(0.0, handler_score)), details 
+    return min(10.0, max(0.0, handler_score)), details
