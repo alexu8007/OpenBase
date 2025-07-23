@@ -24,13 +24,15 @@ def assess_readability(codebase_path: str):
             code = f.read()
         try:
             visitor = ComplexityVisitor.from_code(code)
+            # This loop processes each function in the current file to check for high complexity
+            # and accumulate total complexity and function counts
             for f in visitor.functions:
                 if f.complexity > 10:
                     details.append(f"High complexity ({f.complexity}) in function '{f.name}' at {file_path}:{f.lineno}")
                 total_complexity += f.complexity
                 total_functions += 1
-        except Exception:
-            pass # Ignore files that can't be parsed
+        except SyntaxError as e:
+            print(f"Error: Syntax error while parsing file {file_path}: {e}")  # Log specific parsing error
 
     avg_complexity = (total_complexity / total_functions) if total_functions > 0 else 0
     complexity_score = max(0, 10 - (avg_complexity - 5))
@@ -45,4 +47,4 @@ def assess_readability(codebase_path: str):
     
     readability_score = (0.6 * complexity_score + 0.4 * pep8_score)
     
-    return min(10.0, max(0.0, readability_score)), details 
+    return min(10.0, max(0.0, readability_score)), details
