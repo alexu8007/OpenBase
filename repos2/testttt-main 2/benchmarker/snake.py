@@ -1,4 +1,3 @@
-
 from pyray import *
 import random
 import tensorflow as tf
@@ -39,7 +38,7 @@ class Snake:
         self.is_dead: bool = False
 
         # Initialize tail with two segments at the head's starting position
-        for _ in range(2):
+        for idx, _ in enumerate(range(2)):
             self.tail.append({"x": self.x, "y": self.y})
 
     def update(self, snakes: List['Snake'], food: List[Position]) -> None:
@@ -88,14 +87,14 @@ class Snake:
         Returns:
             A dictionary representing the chosen direction (e.g., {"x": 0, "y": -1}).
         """
-        alive_snakes = [s for s in snakes if not s.is_dead]
+        alive_snakes = (s for s in snakes if not s.is_dead)
         model_input = np.array(format_board(self, alive_snakes, food)).reshape(1, 11, 11, 3)
         prediction = list(model.predict(model_input, verbose=0)[0])
 
         # Sort possible moves by their predicted value in descending order
         # Each item is {"index": DIRS index, "value": prediction score}
         possible_moves = sorted(
-            [{"index": i, "value": prediction[i]} for i in range(len(prediction))],
+            ({ "index": i, "value": prediction[i]} for i in range(len(prediction))),
             key=lambda a: a["value"],
             reverse=True
         )
@@ -105,7 +104,7 @@ class Snake:
             potential_dir = DIRS[move_data["index"]]
             new_x = self.x + potential_dir["x"]
             new_y = self.y + potential_dir["y"]
-            if not self._is_collision_at_position(new_x, new_y, alive_snakes, for_future_move=True):
+            if not self._is_collision_at_position(new_x, new_y, snakes, for_future_move=True):
                 chosen_dir = potential_dir
                 break
 
@@ -141,13 +140,8 @@ class Snake:
                 return True
 
             # Check collision with any snake's tail
-            for i, piece in enumerate(snake.tail):
-                if check_x == piece["x"] and check_y == piece["y"]:
-                    # If checking for a future move and it's our own last tail segment,
-                    # it's not a collision because it will move out of the way.
-                    if for_future_move and snake.id == self.id and i == len(snake.tail) - 1:
-                        continue
-                    return True
+            if any(check_x == piece["x"] and check_y == piece["y"] and not (for_future_move and snake.id == self.id and i == len(snake.tail) - 1) for i, piece in enumerate(snake.tail)):
+                return True
         return False
 
     def _apply_move(self, direction: Position) -> None:
@@ -215,10 +209,9 @@ class Snake:
                 return
 
             # Collision with another snake's tail
-            for piece in snake.tail:
-                if self.x == piece["x"] and self.y == piece["y"]:
-                    self.is_dead = True
-                    return
+            if any(self.x == piece["x"] and self.y == piece["y"] for piece in snake.tail):
+                self.is_dead = True
+                return
 
     def draw(self) -> None:
         """
