@@ -49,7 +49,7 @@ class UmbrellaApp:
         """Initializes a list of notifiers based on the configuration."""
         notifiers = []
         notifier_names_str = self.config.get('Notifications', 'notifiers', fallback='console')
-        notifier_names = [name.strip().lower() for name in notifier_names_str.split(',')]
+        notifier_names = (name.strip().lower() for name in notifier_names_str.split(','))
         
         for name in notifier_names:
             notifier_class = self.NOTIFIER_CLASSES.get(name)
@@ -110,4 +110,4 @@ class UmbrellaApp:
             try:
                 notifier.send(message)
             except Exception as e:
-                logging.error(f"Failed to send notification using {notifier.__class__.__name__}: {e}") 
+                logging.error(f"Failed to send notification using {notifier.__class__.__name__}: {e}")
