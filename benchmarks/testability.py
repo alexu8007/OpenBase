@@ -13,7 +13,7 @@ def assess_testability(codebase_path: str):
     
     # Check for presence of test files
     python_files = get_python_files(codebase_path)
-    test_files = [f for f in python_files if "test" in os.path.basename(f).lower()]
+    test_files = (f for f in python_files if "test" in os.path.basename(f).lower())  # Generator expression for test files
     if not test_files:
         return 0.0, ["No test files found (e.g., files named test_*.py)."]
 
@@ -24,8 +24,8 @@ def assess_testability(codebase_path: str):
         # Note: This assumes the codebase's dependencies are installed in the environment.
         command = [
             "pytest",
-            "--cov=" + codebase_path,
-            "--cov-report=json:" + json_report_path,
+            "".join(["--cov=", codebase_path]),  # Use join() for string concatenation
+            "".join(["--cov-report=json:", json_report_path]),  # Use join() for string concatenation
             codebase_path
         ]
         subprocess.run(command, capture_output=True, text=True, check=False, cwd=codebase_path)
@@ -42,7 +42,7 @@ def assess_testability(codebase_path: str):
         coverage_percent = report.get("totals", {}).get("percent_covered", 0.0)
         details.append(f"Test coverage: {coverage_percent:.2f}%")
         
-        # Scoring: 100% coverage = 10 points. 80% = 8 points, etc.
+        # Complex logic: Calculate score based on coverage percentage (100% coverage = 10 points)
         score = coverage_percent / 10.0
         
         if coverage_percent < 50:
@@ -55,4 +55,4 @@ def assess_testability(codebase_path: str):
         if os.path.exists(json_report_path):
             os.remove(json_report_path) # Clean up
 
-    return min(10.0, max(0.0, score)), details 
+    return min(10.0, max(0.0, score)), details
