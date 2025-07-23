@@ -1,4 +1,3 @@
-
 def format_board(id: str, snakes: list[dict], food: list[dict]) -> list[list[list[int]]]:
     """
     Converts game state information (snakes, food) into a 3D board array representation.
@@ -19,13 +18,7 @@ def format_board(id: str, snakes: list[dict], food: list[dict]) -> list[list[lis
         A 3D list representing the game board with encoded information.
     """
     # convert snake info to 2d board array
-    board = []
-    for j in range(11):
-        board.append([])
-        for k in range(11):
-            board[j].append([])
-            for l in range(3):
-                board[j][k].append(0)
+    board = [[[0 for _ in range(3)] for _ in range(11)] for _ in range(11)]
     # add snakes
     this_snake = None
     for s in snakes:
@@ -33,12 +26,12 @@ def format_board(id: str, snakes: list[dict], food: list[dict]) -> list[list[lis
             this_snake = s
             continue
         board[s["body"][0]["x"]][s["body"][0]["y"]][2] = 5
-        for j in range(len(s["body"])-1):
-            board[s["body"][j+1]["x"]][s["body"][j+1]["y"]][2] = 1
+        for j, segment in enumerate(s["body"][1:]):
+            board[segment["x"]][segment["y"]][2] = 1
     # add this snake
     board[this_snake["body"][0]["x"]][this_snake["body"][0]["y"]][1] = 5
-    for j in range(len(this_snake["body"])-1):
-        board[this_snake["body"][j+1]["x"]][this_snake["body"][j+1]["y"]][1] = 1
+    for j, segment in enumerate(this_snake["body"][1:]):
+        board[segment["x"]][segment["y"]][1] = 1
     # add food
     for f in food:
         board[f["x"]][f["y"]][0] = 1
