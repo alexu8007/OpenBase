@@ -30,7 +30,7 @@ def assess_scalability(codebase_path: str):
     total_functions = 0
     details = []
     
-    caching_keywords = ["redis", "memcached", "celery", "cache", "cachetools", "cachetools.cached"]
+    caching_keywords = {"redis", "memcached", "celery", "cache", "cachetools", "cachetools.cached"}
 
     for file_path in python_files:
         tree = parse_file(file_path)
@@ -40,9 +40,18 @@ def assess_scalability(codebase_path: str):
         for node in ast.walk(tree):
             if isinstance(node, ast.Import):
                 for alias in node.names:
-                    if "asyncio" in alias.name: uses_asyncio = True
-                    if "async" in alias.name: uses_asyncio = True
-                    if "multiprocessing" in alias.name: uses_multiprocessing = True
+                    try:
+                        if "asyncio" in alias.name: uses_asyncio = True
+                    except Exception as e:
+                        details.append(f"Exception in string operation: {e}")
+                    try:
+                        if "async" in alias.name: uses_asyncio = True
+                    except Exception as e:
+                        details.append(f"Exception in string operation: {e}")
+                    try:
+                        if "multiprocessing" in alias.name: uses_multiprocessing = True
+                    except Exception as e:
+                        details.append(f"Exception in string operation: {e}")
                     if any(keyword in alias.name for keyword in caching_keywords): uses_caching_libs = True
             elif isinstance(node, ast.ImportFrom):
                 if node.module:
@@ -111,7 +120,14 @@ def assess_scalability(codebase_path: str):
                 try:
                     with open(file_path, "r", encoding="utf-8", errors="ignore") as f:
                         content = f.read()
-                except Exception:
+                except FileNotFoundError:
+                    details.append(f"File not found: {file_path}")
+                    continue
+                except PermissionError:
+                    details.append(f"Permission denied for file: {file_path}")
+                    continue
+                except Exception as e:
+                    details.append(f"Error reading file {file_path}: {e}")
                     continue
 
                 # Truncate very large files to avoid blowing the context window
@@ -121,12 +137,12 @@ def assess_scalability(codebase_path: str):
                 if snippet_chars + len(content) > MAX_CHARS:
                     break
 
-                snippets.append(f"FILE: {file_path}\n```\n{content}\n```\n")
+                snippets.append(f"FILE: {file_path}\n\n{content}\n\n")
                 snippet_chars += len(content)
 
             code_corpus = "\n".join(snippets)
 
-            full_prompt = prompt + "\nHere are code excerpts:\n" + code_corpus
+            full_prompt = ''.join([prompt, "\nHere are code excerpts:\n", code_corpus])
 
             rsp = model.generate_content(full_prompt, generation_config={"temperature": 0.0})
             first_token = rsp.text.strip().split()[0]
@@ -144,4 +160,4 @@ def assess_scalability(codebase_path: str):
             details.append("GEMINI_API_KEY environment variable not set; skipping Gemini evaluation.")
 
     final_score = llm_score_0_to_10 if llm_score_0_to_10 is not None else min(10.0, max(0.0, score))
-    return final_score, details 
+    return final_score, details

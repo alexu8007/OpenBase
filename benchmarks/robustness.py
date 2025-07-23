@@ -23,21 +23,31 @@ def assess_robustness(codebase_path: str):
         if not tree:
             continue
         
+        check_imports = True  # Flag to optimize import checks
+        # Nested loop to iterate through AST nodes for imports and exception handlers
         for node in ast.walk(tree):
-            if isinstance(node, ast.Import) and any(alias.name == "logging" for alias in node.names):
+            if check_imports and isinstance(node, ast.Import) and any(alias.name == "logging" for alias in node.names):
                 uses_logging = True
-            if isinstance(node, ast.ImportFrom) and node.module == "logging":
-                uses_logging = True
+                check_imports = False  # Stop further import checks
+            if check_imports and isinstance(node, ast.ImportFrom) and node.module == "logging":
+                try:
+                    uses_logging = True
+                except (TypeError, ValueError) as e:
+                    details.append(f"Error in import check: {e}")
+                check_imports = False  # Stop further import checks
 
             if isinstance(node, ast.ExceptHandler):
-                total_handlers += 1
-                if node.type:
-                    if isinstance(node.type, ast.Name) and node.type.id == 'Exception':
-                        details.append(f"Generic 'except Exception' used in {file_path}:{node.lineno}")
+                try:
+                    total_handlers += 1
+                    if node.type:
+                        if isinstance(node.type, ast.Name) and node.type.id == 'Exception':
+                            details.append(f"Generic 'except Exception' used in {file_path}:{node.lineno}")
+                        else:
+                            good_handlers += 1
                     else:
-                        good_handlers += 1
-                else:
-                    details.append(f"Bare 'except:' used in {file_path}:{node.lineno}")
+                        details.append(f"Bare 'except:' used in {file_path}:{node.lineno}")
+                except (TypeError, ValueError) as e:
+                    details.append(f"Error in exception handler check: {e}")
 
     if uses_logging:
         details.insert(0, "Codebase appears to use the 'logging' module.")
@@ -55,4 +65,4 @@ def assess_robustness(codebase_path: str):
     
     details.insert(1, f"Error handling quality: {handler_quality*100:.2f}% ({good_handlers}/{total_handlers} specific handlers)")
 
-    return min(10.0, max(0.0, handler_score)), details 
+    return min(10.0, max(0.0, handler_score)), details
