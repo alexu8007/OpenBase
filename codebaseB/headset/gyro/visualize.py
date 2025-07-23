@@ -1,4 +1,3 @@
-
 from flask import Flask, render_template, jsonify
 import paho.mqtt.client as mqtt
 import json
@@ -71,7 +70,7 @@ def on_message(client: mqtt.Client, userdata: Any, msg: Any) -> None:
                 gyro_calibration["y"] /= CALIBRATION_SAMPLES_NEEDED
                 gyro_calibration["z"] /= CALIBRATION_SAMPLES_NEEDED
                 is_calibrating = False
-                print(f"Calibration complete: {gyro_calibration}")
+                print(''.join(["Calibration complete: ", str(gyro_calibration)]))
             return
         
         gyro_x -= gyro_calibration["x"]
