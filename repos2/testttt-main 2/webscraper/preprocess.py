@@ -1,4 +1,3 @@
-
 import msgpack
 import json
 import gc
@@ -75,13 +74,7 @@ def _initialize_empty_board(
     Returns:
         A 3D list representing the empty board, initialized with zeros.
     """
-    board: List[List[List[int]]] = []
-    for _ in range(board_width):
-        row: List[List[int]] = []
-        for _ in range(board_height):
-            cell: List[int] = [0] * num_channels
-            row.append(cell)
-        board.append(row)
+    board: List[List[List[int]]] = [[[0] * num_channels for _ in range(board_height)] for _ in range(board_width)]
     return board
 
 def _populate_snakes_on_board(
@@ -110,8 +103,7 @@ def _populate_snakes_on_board(
         board[head_pos[x_idx]][head_pos[y_idx]][channel] = 5
         
         # Set other body parts (value 1)
-        for i in range(1, len(snake["body"])):
-            body_part_pos = snake["body"][i]
+        for i, body_part_pos in enumerate(snake["body"][1:]):
             board[body_part_pos[x_idx]][body_part_pos[y_idx]][channel] = 1
 
 def _populate_food_on_board(
@@ -165,8 +157,7 @@ def preprocessGame(game: Dict[str, Any], flip: bool = False) -> List[Dict[str, A
     num_channels: int = 3 # Food, Winner Snake, Other Snakes
 
     # Iterate through game states, excluding the last one as we need a 'next_state'
-    for i in range(len(game["states"]) - 1):
-        current_state = game["states"][i]
+    for i, current_state in enumerate(game["states"][:-1]):
         next_state = game["states"][i+1]
         winner_id = game["winnerId"]
 
@@ -204,7 +195,7 @@ for game in data:
     preprocessedFlippedGame: List[Dict[str, Any]] = preprocessGame(game, True)
     for frame in preprocessedFlippedGame:
         preprocessed.append(frame)
-    print("Game", num, ": Number of frames", len(preprocessed))
+    print(' '.join(["Game", str(num), ":", "Number", "of", "frames", str(len(preprocessed))]))
     num+=1
 
 with open('data/preprocessed_data.msgpack', 'wb') as f:
