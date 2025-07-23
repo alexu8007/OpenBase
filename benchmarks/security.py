@@ -1,4 +1,5 @@
 import subprocess
+import tempfile  # Added for secure temporary file handling
 
 SUPPORTED_LANGUAGES = {"python"}
 import json
@@ -62,35 +63,42 @@ def _assess_static_security(codebase_path: str) -> tuple[float, List[str], Dict[
     
     # --- Bandit Scan ---
     bandit_score = 10.0
-    try:
-        command = ["bandit", "-r", codebase_path, "-f", "json"]
-        result = subprocess.run(command, capture_output=True, text=True, check=False)
-        report = json.loads(result.stdout)
-        
-        if report and "results" in report:
-            findings = report["results"]
-            high = sum(1 for f in findings if f["issue_severity"] == "HIGH")
-            medium = sum(1 for f in findings if f["issue_severity"] == "MEDIUM")
-            low = sum(1 for f in findings if f["issue_severity"] == "LOW")
-            
-            details.append(f"[Bandit] High: {high}, Medium: {medium}, Low: {low}")
-            metrics["bandit_high"] = high
-            metrics["bandit_medium"] = medium
-            metrics["bandit_low"] = low
-
-            for f in findings[:10]:  # Limit to first 10
-                details.append(f"  - {f['issue_text']} ({f['filename']}:{f['line_number']})")
-
-            score_deduction = (high * 3) + (medium * 1) + (low * 0.5)
-            bandit_score = max(0.0, 10.0 - score_deduction)
-    except (json.JSONDecodeError, FileNotFoundError):
-        details.append("[Bandit] Could not run bandit.")
+    if not isinstance(codebase_path, str) or not codebase_path:  # Check for untrusted input
+        details.append("[Bandit] Invalid codebase path.")
         bandit_score = 0.0
+    else:
+        try:
+            command = ["bandit", "-r", codebase_path, "-f", "json"]
+            result = subprocess.run(command, capture_output=True, text=True, check=False)
+            report = json.loads(result.stdout)
+            
+            if report and "results" in report:
+                findings = report["results"]
+                high = sum(1 for f in findings if f["issue_severity"] == "HIGH")
+                medium = sum(1 for f in findings if f["issue_severity"] == "MEDIUM")
+                low = sum(1 for f in findings if f["issue_severity"] == "LOW")
+                
+                details.append(f"[Bandit] High: {high}, Medium: {medium}, Low: {low}")
+                metrics["bandit_high"] = high
+                metrics["bandit_medium"] = medium
+                metrics["bandit_low"] = low
+
+                for f in findings[:10]:  # Limit to first 10
+                    details.append(f"  - {f['issue_text']} ({f['filename']}:{f['line_number']})")
+
+                score_deduction = (high * 3) + (medium * 1) + (low * 0.5)
+                bandit_score = max(0.0, 10.0 - score_deduction)
+        except (json.JSONDecodeError, FileNotFoundError):
+            details.append("[Bandit] Could not run bandit.")
+            bandit_score = 0.0
 
     # --- Safety Scan ---
     safety_score = 10.0
     req_file = os.path.join(codebase_path, "requirements.txt")
-    if os.path.exists(req_file):
+    if not isinstance(req_file, str) or not req_file:  # Check for untrusted input
+        details.append("[Safety] Invalid requirements file path.")
+        safety_score = 0.0
+    elif os.path.exists(req_file):
         try:
             command = ["safety", "check", f"--file={req_file}", "--json"]
             result = subprocess.run(command, capture_output=True, text=True, check=False)
@@ -127,46 +135,52 @@ def _assess_dynamic_security(web_app_url: str) -> tuple[float, List[str], Dict[s
     # Check if ZAP is available
     try:
         # Try ZAP baseline scan (quick passive scan)
-        command = [
-            "docker", "run", "--rm", "-t",
-            "owasp/zap2docker-stable",
-            "zap-baseline.py",
-            "-t", web_app_url,
-            "-J", "/tmp/zap-report.json"
-        ]
-        
-        details.append(f"[ZAP] Running baseline scan on {web_app_url}")
-        
-        # Run with timeout
-        result = subprocess.run(
-            command, 
-            capture_output=True, 
-            text=True, 
-            timeout=120,  # 2 minute timeout
-            check=False
-        )
-        
-        # ZAP returns non-zero on findings, so check output instead
-        if "PASS" in result.stdout or "WARN" in result.stdout:
-            # Count severity levels from output
-            high_count = result.stdout.count("HIGH")
-            medium_count = result.stdout.count("MEDIUM") 
-            low_count = result.stdout.count("LOW")
-            
-            details.append(f"[ZAP] Findings - High: {high_count}, Medium: {medium_count}, Low: {low_count}")
-            
-            metrics["zap_high"] = high_count
-            metrics["zap_medium"] = medium_count
-            metrics["zap_low"] = low_count
-            
-            # Score based on findings
-            score_deduction = (high_count * 4) + (medium_count * 2) + (low_count * 0.5)
-            dynamic_score = max(0.0, 10.0 - score_deduction)
-            
+        if not isinstance(web_app_url, str) or not web_app_url.startswith(('http://', 'https://')):  # Check for untrusted input
+            details.append("[ZAP] Invalid web app URL.")
+            dynamic_score = 0.0
         else:
-            details.append("[ZAP] Scan completed but could not parse results")
-            dynamic_score = 5.0
-            
+            with tempfile.NamedTemporaryFile(delete=False, suffix='.json') as tmp_file:  # Use secure temporary file method
+                zap_report_path = tmp_file.name
+                command = [
+                    "docker", "run", "--rm", "-t",
+                    "owasp/zap2docker-stable",
+                    "zap-baseline.py",
+                    "-t", web_app_url,
+                    "-J", zap_report_path  # Fixed hardcoded tmp directory
+                ]
+                
+                details.append(f"[ZAP] Running baseline scan on {web_app_url}")
+                
+                # Run with timeout
+                result = subprocess.run(
+                    command, 
+                    capture_output=True, 
+                    text=True, 
+                    timeout=120,  # 2 minute timeout
+                    check=False
+                )
+                
+                # ZAP returns non-zero on findings, so check output instead
+                if "PASS" in result.stdout or "WARN" in result.stdout:
+                    # Count severity levels from output
+                    high_count = result.stdout.count("HIGH")
+                    medium_count = result.stdout.count("MEDIUM") 
+                    low_count = result.stdout.count("LOW")
+                    
+                    details.append(f"[ZAP] Findings - High: {high_count}, Medium: {medium_count}, Low: {low_count}")
+                    
+                    metrics["zap_high"] = high_count
+                    metrics["zap_medium"] = medium_count
+                    metrics["zap_low"] = low_count
+                    
+                    # Score based on findings
+                    score_deduction = (high_count * 4) + (medium_count * 2) + (low_count * 0.5)
+                    dynamic_score = max(0.0, 10.0 - score_deduction)
+                    
+                else:
+                    details.append("[ZAP] Scan completed but could not parse results")
+                    dynamic_score = 5.0
+                    
     except subprocess.TimeoutExpired:
         details.append("[ZAP] Scan timed out (>2 min)")
         dynamic_score = 3.0
@@ -178,4 +192,4 @@ def _assess_dynamic_security(web_app_url: str) -> tuple[float, List[str], Dict[s
         dynamic_score = 3.0
     
     metrics["dynamic_score"] = dynamic_score
-    return dynamic_score, details, metrics 
+    return dynamic_score, details, metrics
