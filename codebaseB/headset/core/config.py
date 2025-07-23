@@ -1,4 +1,0 @@
-MQTT_HOST = '192.168.2.219'
-MQTT_PORT = 1883
-HEADSET_MQTT_HOST = 'localhost'
-AWS_REGION = 'us-east-2' 
