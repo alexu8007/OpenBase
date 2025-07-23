@@ -1,4 +1,3 @@
-
 from pyray import *
 import random
 import tensorflow as tf
@@ -39,7 +38,7 @@ class Snake:
         self.is_dead: bool = False
 
         # Initialize tail with two segments at the head's starting position
-        for _ in range(2):
+        for enum_idx, _ in enumerate(range(2)):
             self.tail.append({"x": self.x, "y": self.y})
 
     def update(self, snakes: List['Snake'], food: List[Position]) -> None:
@@ -68,7 +67,7 @@ class Snake:
             return
 
         # Move all tail segments to the position of the segment in front of them
-        for i in reversed(range(1, len(self.tail))):
+        for enum_idx, i in enumerate(reversed(range(1, len(self.tail)))):
             self.tail[i]["x"] = self.tail[i-1]["x"]
             self.tail[i]["y"] = self.tail[i-1]["y"]
 
@@ -88,14 +87,14 @@ class Snake:
         Returns:
             A dictionary representing the chosen direction (e.g., {"x": 0, "y": -1}).
         """
-        alive_snakes = [s for s in snakes if not s.is_dead]
+        alive_snakes = (s for s in snakes if not s.is_dead)
         model_input = np.array(format_board(self, alive_snakes, food)).reshape(1, 11, 11, 3)
         prediction = list(model.predict(model_input, verbose=0)[0])
 
         # Sort possible moves by their predicted value in descending order
         # Each item is {"index": DIRS index, "value": prediction score}
         possible_moves = sorted(
-            [{"index": i, "value": prediction[i]} for i in range(len(prediction))],
+            ({"index": i, "value": prediction[i]} for i in range(len(prediction))),
             key=lambda a: a["value"],
             reverse=True
         )
@@ -105,7 +104,7 @@ class Snake:
             potential_dir = DIRS[move_data["index"]]
             new_x = self.x + potential_dir["x"]
             new_y = self.y + potential_dir["y"]
-            if not self._is_collision_at_position(new_x, new_y, alive_snakes, for_future_move=True):
+            if not self._is_collision_at_position(new_x, new_y, list(alive_snakes), for_future_move=True):  # Convert generator back to list for this call
                 chosen_dir = potential_dir
                 break
 
@@ -215,10 +214,10 @@ class Snake:
                 return
 
             # Collision with another snake's tail
-            for piece in snake.tail:
-                if self.x == piece["x"] and self.y == piece["y"]:
-                    self.is_dead = True
-                    return
+            tail_positions = set((piece["x"], piece["y"]) for piece in snake.tail)
+            if (self.x, self.y) in tail_positions:
+                self.is_dead = True
+                return
 
     def draw(self) -> None:
         """
