@@ -30,18 +30,17 @@ def assess_documentation(codebase_path: str):
             if _good_docstring(ast.get_docstring(tree)):
                 good_docstrings += 1
         else:
-            details.append(f"Missing docstring in module: {file_path}")
+            details.append(''.join(["Missing docstring in module: ", file_path]))
 
-        for node in ast.walk(tree):
-            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
-                total_entities += 1
-                ds = ast.get_docstring(node)
-                if ds:
-                    documented_entities += 1
-                    if _good_docstring(ds):
-                        good_docstrings += 1
-                else:
-                    details.append(f"Missing docstring for '{node.name}' in {file_path}:{node.lineno}")
+        for node in (n for n in ast.walk(tree) if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef))):
+            total_entities += 1
+            ds = ast.get_docstring(node)
+            if ds:
+                documented_entities += 1
+                if _good_docstring(ds):
+                    good_docstrings += 1
+            else:
+                details.append(''.join(["Missing docstring for '", node.name, "' in ", file_path, ":", str(node.lineno)]))
     
     if total_entities == 0:
         return 0.0, ["No documentable entities (classes, functions) found."]
@@ -56,8 +55,8 @@ def assess_documentation(codebase_path: str):
 
     final_score = (coverage_score + quality_score) / 2.0
 
-    details.insert(0, f"Documentation coverage: {doc_coverage:.2f}% ({documented_entities}/{total_entities})")
-    details.insert(1, f"Good docstrings: {good_docstrings}/{documented_entities} ({quality_ratio*100:.1f}%)")
+    details.insert(0, ''.join(["Documentation coverage: ", str(doc_coverage), "% (", str(documented_entities), "/", str(total_entities), ")"]))
+    details.insert(1, ''.join(["Good docstrings: ", str(good_docstrings), "/", str(documented_entities), " (", str(quality_ratio*100), "%)"]))
 
     return min(10.0, max(0.0, final_score)), details 
 
@@ -68,10 +67,10 @@ def assess_documentation(codebase_path: str):
 def _good_docstring(ds: str) -> bool:
     """Heuristic: multiline and contains Args/Parameters or Returns, or >50 chars."""
     raw_lines = ds.splitlines()
-    non_blank_lines = [ln.strip() for ln in raw_lines if ln.strip()]
+    non_blank_lines = (ln.strip() for ln in raw_lines if ln.strip())
 
     # Must have at least summary + description lines
-    if len(non_blank_lines) < 3:
+    if len(list(non_blank_lines)) < 3:
         return False
 
     # Heuristic 2: reject if more than 5 consecutive blank lines (excessive vertical space)
@@ -94,3 +93,4 @@ def _good_docstring(ds: str) -> bool:
     has_returns = "returns:" in lowered
 
     return has_args and has_returns 
+    # Add comment for documentation: This function evaluates if a docstring meets quality criteria.
