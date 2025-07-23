@@ -1,4 +1,3 @@
-
 #!/usr/bin/env python3
 import paho.mqtt.client as mqtt
 import json
@@ -120,7 +119,7 @@ def on_message(client: mqtt.Client, userdata: Any, msg: mqtt.MQTTMessage) -> Non
         client.publish(MQTT_OUTPUT_TOPIC, json.dumps(output_data))
         
         if current_timestamp % 5 < 0.1:
-            print(f"Published: {output_data}")
+            print(''.join(["Published: ", str(output_data)]))
             
     except Exception as e:
         print(f"Error processing message: {e}")
