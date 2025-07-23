@@ -29,6 +29,7 @@ from benchmarks import (
 )
 from benchmarks.db import record_run
 from benchmarks.stats_utils import normalize_scores_zscore, BenchmarkResult
+from main_utils import _load_benchmarks, _analyze_single_codebase, _collect  # Import from new module
 
 BUILT_IN_MODULES = [
     readability,
@@ -43,24 +44,6 @@ BUILT_IN_MODULES = [
     git_health,
 ]
 
-app = typer.Typer(context_settings={"help_option_names": ["-h", "--help"]})
-console = Console()
-
-# Dynamically collect benchmarks
-def _load_benchmarks():
-    mapping = {}
-    for mod in BUILT_IN_MODULES:
-        raw_name = mod.__name__.split(".")[-1]
-        display_name = raw_name.replace("_", " ").title().replace(" ", "")  # e.g., git_health -> GitHealth
-        func_name = f"assess_{raw_name}"
-        if not hasattr(mod, func_name):
-            # try camel variant (legacy)
-            func_name_alt = func_name.replace("_", "")
-            if hasattr(mod, func_name_alt):
-                func_name = func_name_alt
-        mapping[display_name] = getattr(mod, func_name)
-    return mapping
-
 BENCHMARK_FUNCS = _load_benchmarks()
 
 # Map of benchmark name -> supported languages set (lowercase)
@@ -72,25 +55,6 @@ for mod in BUILT_IN_MODULES:
     if langs == "any":
         langs = {"any"}
     BENCHMARK_LANGS[display_name] = {lang.lower() for lang in langs}
-
-def _analyze_single_codebase(path: Path, skip_set, benchmark_weights):
-    """Run benchmarks on a single codebase directory and return raw score dict."""
-    from benchmarks.language_utils import detect_languages
-    langs = detect_languages(path)
-    raw_scores = {}
-
-    for name, func in BENCHMARK_FUNCS.items():
-        if name in skip_set:
-            continue
-        supported = BENCHMARK_LANGS.get(name, {"any"})
-        if "any" not in supported and not (langs & supported):
-            continue
-        result = func(str(path))
-        if isinstance(result, BenchmarkResult):
-            raw_scores[name] = result.score
-        else:
-            raw_scores[name] = result[0] if isinstance(result, tuple) else result
-    return raw_scores
 
 @app.command()
 def compare_collections(
@@ -112,20 +76,6 @@ def compare_collections(
 
     skip_set = {s.strip().capitalize() for s in skip.split(',') if s.strip()}
 
-    def _collect(folder, progress, task_id):
-        repo_dirs = [d for d in folder.iterdir() if d.is_dir() and not d.name.startswith('.')]
-        aggregate: defaultdict[str, list] = defaultdict(list)
-        for repo in repo_dirs:
-            # Update progress bar description
-            progress.update(task_id, description=f"{folder.name}/{repo.name}")
-            raw_scores = _analyze_single_codebase(repo, skip_set, benchmark_weights)
-            for k, v in raw_scores.items():
-                aggregate[k].append(v)
-            progress.advance(task_id)
-        avg_scores = {k: (sum(vs)/len(vs) if vs else 0.0) for k, vs in aggregate.items()}
-        return avg_scores, len(repo_dirs)
-
-    from rich.progress import Progress, SpinnerColumn, TextColumn, BarColumn, TimeElapsedColumn
     total_repos = sum(1 for _ in folder1.iterdir() if _.is_dir() and not _.name.startswith('.')) + sum(1 for _ in folder2.iterdir() if _.is_dir() and not _.name.startswith('.'))
     with Progress(
         SpinnerColumn(),
@@ -137,19 +87,18 @@ def compare_collections(
         transient=True
     ) as progress:
         task_id = progress.add_task("Analyzing repositories...", total=total_repos)
-        avg1, n1 = _collect(folder1, progress, task_id)
-        avg2, n2 = _collect(folder2, progress, task_id)
+        avg1, n1 = _collect(folder1, progress, task_id, skip_set, benchmark_weights)
+        avg2, n2 = _collect(folder2, progress, task_id, skip_set, benchmark_weights)
 
     console.print(Align.center("[bold blue]🔍 OpenBase Collection Analysis[/bold blue]"))
     console.print(Align.center(f"Comparing collection [magenta]{folder1.name}[/magenta] ({n1} repos) vs [green]{folder2.name}[/green] ({n2} repos)"))
     console.print()
 
     # Build table
-    from rich.table import Table
     table = Table(title="📊 Collection Quality Comparison", box=box.ROUNDED)
     table.add_column("Benchmark", style="cyan")
-    table.add_column(f"🔵 {folder1.name}")
-    table.add_column(f"🟢 {folder2.name}")
+    table.add_column("".join(["🔵 ", folder1.name]))  # Modified
+    table.add_column("".join(["🟢 ", folder2.name]))  # Modified
     table.add_column("Winner")
 
     total1 = total2 = 0.0
@@ -166,7 +115,6 @@ def compare_collections(
     table.add_row("TOTAL", f"{total1:.2f}", f"{total2:.2f}", "🔵" if total1 > total2 else ("🟢" if total2 > total1 else "🤝"))
     console.print(table)
 
-
 @app.command()
 def compare(
     codebase1: Path = typer.Option(..., "--codebase1", "-c1", help="Path to the first codebase."),
@@ -177,9 +125,6 @@ def compare(
     export: Path = typer.Option(None, "--export", help="Path to write JSON export of results."),
     profile: Path = typer.Option(None, "--profile", help="Python script to execute for runtime profiling (pyinstrument)"),
 ):
-    """
-    Compares two codebases and rates them on a scale based on different benchmarks.
-    """
     if not codebase1.is_dir() or not codebase2.is_dir():
         console.print("[bold red]Error: Both codebases must be valid directories.[/bold red]")
         raise typer.Exit(code=1)
@@ -192,11 +137,9 @@ def compare(
 
     skip_set = {s.strip().capitalize() for s in skip.split(',') if s.strip()}
 
-    # Set env for runtime profiling
     if profile:
         os.environ["BENCH_PROFILE_SCRIPT"] = str(profile)
 
-    # Welcome banner
     welcome_text = Text.assemble(
         ("🔍 OpenBase", "bold blue"),
         (" - Professional Codebase Quality Analysis", "bold white")
@@ -205,12 +148,10 @@ def compare(
     console.print(Align.center(f"Comparing [magenta]{codebase1.name}[/magenta] vs [green]{codebase2.name}[/green]"))
     console.print()
 
-    # Detect languages present in each codebase
     from benchmarks.language_utils import detect_languages
     langs1 = detect_languages(codebase1)
     langs2 = detect_languages(codebase2)
 
-    # Prepare benchmarks to run, filtering by language support
     benchmarks_to_run = []
     for name, func in BENCHMARK_FUNCS.items():
         if name in skip_set:
@@ -222,10 +163,8 @@ def compare(
     raw_scores1, raw_scores2 = {}, {}
     details1, details2 = {}, {}
     raw_metrics1, raw_metrics2 = {}, {}
-    # Store full result objects so we don't need to re-run benchmarks later
     result_objects1, result_objects2 = {}, {}
 
-    # Run benchmarks with progress tracking
     with Progress(
         SpinnerColumn(),
         TextColumn("[progress.description]{task.description}"),
@@ -246,7 +185,6 @@ def compare(
             result1 = func(str(codebase1))
             result2 = func(str(codebase2))
             
-            # Handle both old tuple format and new BenchmarkResult
             if isinstance(result1, BenchmarkResult):
                 score1, detail1 = result1.score, result1.details
                 raw_metrics1[name] = result1.raw_metrics
@@ -261,7 +199,6 @@ def compare(
                 score2, detail2 = result2
                 raw_metrics2[name] = {}
             
-            # cache result objects
             result_objects1[name] = result1
             result_objects2[name] = result2
 
@@ -272,21 +209,18 @@ def compare(
             details2[name] = detail2
             
             progress.advance(main_task)
-            time.sleep(0.1)  # Small delay for visual effect
+            time.sleep(0.1)
     
     console.print("✅ Analysis complete!\n")
     
-    # Check for empty repositories
     if all(score == 0.0 for score in raw_scores1.values()):
         console.print(f"[yellow]Warning: {codebase1.name} appears to be empty or has no analyzable code.[/yellow]")
     if all(score == 0.0 for score in raw_scores2.values()):
         console.print(f"[yellow]Warning: {codebase2.name} appears to be empty or has no analyzable code.[/yellow]")
     
-    # Apply z-score normalization to prevent metric dominance
     normalized_scores1 = normalize_scores_zscore(raw_scores1)
     normalized_scores2 = normalize_scores_zscore(raw_scores2)
     
-    # Create enhanced results table
     table = Table(
         title="📊 Codebase Quality Comparison Results",
         box=box.ROUNDED,
@@ -294,25 +228,19 @@ def compare(
         header_style="bold white on blue"
     )
     table.add_column("Benchmark", justify="right", style="cyan", no_wrap=True)
-    table.add_column(f"🔵 {codebase1.name}", justify="center", style="magenta")
-    table.add_column(f"🟢 {codebase2.name}", justify="center", style="green")
+    table.add_column("".join(["🔵 ", codebase1.name]))  # Modified
+    table.add_column("".join(["🟢 ", codebase2.name]))  # Modified
     table.add_column("Winner", justify="center", style="bold yellow")
     
-    # Apply weights and calculate totals
     total_score1, total_score2 = 0, 0
-    for name in benchmarks_to_run:
-        name = name[0]  # Extract name string from tuple
-        func = BENCHMARK_FUNCS[name]
-            
+    for name, _ in benchmarks_to_run:
         weight = benchmark_weights.get(name, 1.0)
         weighted_score1 = normalized_scores1[name] * weight
         weighted_score2 = normalized_scores2[name] * weight
         
-        # Accumulate total scores
         total_score1 += weighted_score1
         total_score2 += weighted_score2
 
-        # Format scores with confidence intervals if available
         result1 = result_objects1[name]
         result2 = result_objects2[name]
         
@@ -330,20 +258,12 @@ def compare(
             score1_display += f" (x{weight})"
             score2_display += f" (x{weight})"
         
-        # Determine winner
-        if weighted_score1 > weighted_score2:
-            winner = "🔵"
-        elif weighted_score2 > weighted_score1:
-            winner = "🟢"
-        else:
-            winner = "🤝"
+        winner = "🔵" if weighted_score1 > weighted_score2 else ("🟢" if weighted_score2 > weighted_score1 else "🤝")
             
         table.add_row(name, score1_display, score2_display, winner)
     
-    # Add separator and totals
     table.add_row("", "", "", "")
     
-    # Overall winner
     if total_score1 > total_score2:
         overall_winner = "🔵 " + codebase1.name
         winner_style = "bold magenta"
@@ -363,7 +283,6 @@ def compare(
     
     console.print(table)
     
-    # Summary panel
     score_diff = abs(total_score1 - total_score2)
     if score_diff > 10:
         assessment = "significantly better"
@@ -383,7 +302,6 @@ def compare(
     )
     console.print(summary_panel)
 
-    # Store enhanced results
     enhanced_results = {
         "details1": details1, 
         "details2": details2,
@@ -396,7 +314,6 @@ def compare(
     }
     record_run(str(codebase1), str(codebase2), total_score1, total_score2, enhanced_results)
 
-    # Export if requested
     if export:
         export_data = {
             "codebase1": str(codebase1),
@@ -417,28 +334,24 @@ def compare(
         for name, _ in benchmarks_to_run:
             console.print(f"\n[bold cyan]🔍 {name} Analysis[/bold cyan]")
             
-            # Create a tree structure for better organization
             tree = Tree(f"[bold]{name}[/bold]")
             
-            # Add codebase 1 details
             cb1_branch = tree.add(f"[magenta]🔵 {codebase1.name}[/magenta] - Score: [bold]{normalized_scores1[name]:.2f}[/bold]")
             details1_content = details1[name] if details1[name] else ["✅ No issues found."]
-            for detail in details1_content[:5]:  # Limit to first 5 items
+            for detail in details1_content[:5]:
                 cb1_branch.add(f"• {detail}")
             if len(details1_content) > 5:
                 cb1_branch.add(f"[dim]... and {len(details1_content) - 5} more items[/dim]")
             
-            # Add codebase 2 details
             cb2_branch = tree.add(f"[green]🟢 {codebase2.name}[/green] - Score: [bold]{normalized_scores2[name]:.2f}[/bold]")
             details2_content = details2[name] if details2[name] else ["✅ No issues found."]
-            for detail in details2_content[:5]:  # Limit to first 5 items
+            for detail in details2_content[:5]:
                 cb2_branch.add(f"• {detail}")
             if len(details2_content) > 5:
                 cb2_branch.add(f"[dim]... and {len(details2_content) - 5} more items[/dim]")
             
             console.print(tree)
             
-            # Add interpretation
             score1, score2 = normalized_scores1[name], normalized_scores2[name]
             if abs(score1 - score2) < 0.5:
                 interpretation = "📊 Both codebases perform similarly in this area."
@@ -448,8 +361,7 @@ def compare(
                 interpretation = f"📈 {codebase2.name} outperforms {codebase1.name} by {score2-score1:.1f} points."
             
             console.print(f"[dim]{interpretation}[/dim]")
-            console.print()  # Add spacing
-
+            console.print()
 
 if __name__ == "__main__":
-    app() 
+    app()
