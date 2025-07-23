@@ -1,4 +1,3 @@
-
 import tensorflow as tf
 import numpy as np
 from typing import List, Dict, Any, Optional, Tuple
@@ -78,12 +77,10 @@ class Snake:
         if new_x > 10 or new_x < 0 or new_y > 10 or new_y < 0:
             return True
 
-        # Check for self-collision or other snake collision
-        for snake in snakes:
-            for piece in snake["body"]:
-                if new_x == piece["x"] and new_y == piece["y"]:
-                    print("terrible move", this_snake_x, this_snake_y, new_x, new_y)
-                    return True
+        occupied = set((piece["x"], piece["y"]) for snake in snakes for piece in snake["body"])
+        if (new_x, new_y) in occupied:
+            print("terrible move", this_snake_x, this_snake_y, new_x, new_y)
+            return True
         return False
 
     def _find_best_valid_move(self, prediction: List[float], snakes: List[Dict[str, Any]], this_snake_x: int, this_snake_y: int) -> Optional[Dict[str, Any]]:
@@ -101,12 +98,12 @@ class Snake:
             A dictionary containing the 'index' and 'value' of the best valid move,
             or None if all predicted moves are terrible.
         """
-        possibles = [{"index": i, "value": prediction[i]} for i in range(len(prediction))]
-        possibles.sort(key=lambda a: a["value"]) # Sorts in ascending order
+        generator = ({"index": i, "value": prediction[i]} for i in range(len(prediction)))
+        possibles = sorted(generator, key=lambda a: a["value"])  # Sorts in ascending order
 
         best_valid_move: Optional[Dict[str, Any]] = None
         while possibles:
-            current_best = possibles.pop() # Get the highest value prediction
+            current_best = possibles.pop()  # Get the highest value prediction
             if not self.is_a_terrible_move(snakes, this_snake_x, this_snake_y, current_best):
                 best_valid_move = current_best
                 break
