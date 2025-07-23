@@ -116,10 +116,10 @@ html_text = '''
                             infoHTML += '<ul>';
                             
                             data.detections.forEach((det, index) => {
-                                infoHTML += '<li>' + det.label + ' (confidence: ' + det.confidence.toFixed(2) + ')';
+                                infoHTML += ''.join(['<li>', det.label, ' (confidence: ', det.confidence.toFixed(2), '']);
                                 
                                 if (det.distance !== undefined) {
-                                    infoHTML += ' - Distance: ' + det.distance.toFixed(2) + 'm';
+                                    infoHTML += ''.join([' - Distance: ', det.distance.toFixed(2), 'm']);
                                 }
                                 
                                 infoHTML += '</li>';
