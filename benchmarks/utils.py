@@ -4,9 +4,7 @@ import ast
 def get_python_files(path):
     python_files = []
     for root, _, files in os.walk(path):
-        for file in files:
-            if file.endswith(".py"):
-                python_files.append(os.path.join(root, file))
+        python_files.extend([os.path.join(root, f) for f in files if f.endswith(".py")])
     return python_files
 
 def parse_file(file_path):
@@ -14,4 +12,4 @@ def parse_file(file_path):
         try:
             return ast.parse(source.read(), filename=file_path)
         except (SyntaxError, UnicodeDecodeError):
-            return None 
+            return None
