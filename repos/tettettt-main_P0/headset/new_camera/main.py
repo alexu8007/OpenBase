@@ -1,146 +1,3 @@
-
-html_text = '''
-    <!DOCTYPE html>
-    <html>
-    <head>
-        <title>Detection Visualization</title>
-        <style>
-            body {
-                font-family: Arial, sans-serif;
-                margin: 20px;
-                background-color: #f0f0f0;
-            }
-            .container {
-                display: flex;
-                flex-wrap: wrap;
-                gap: 20px;
-            }
-            .image-container {
-                background-color: white;
-                padding: 10px;
-                border-radius: 5px;
-                box-shadow: 0 2px 5px rgba(0,0,0,0.1);
-            }
-            h2 {
-                margin-top: 0;
-            }
-            button {
-                background-color: #4CAF50;
-                border: none;
-                color: white;
-                padding: 10px 20px;
-                text-align: center;
-                text-decoration: none;
-                display: inline-block;
-                font-size: 16px;
-                margin: 20px 0;
-                cursor: pointer;
-                border-radius: 4px;
-            }
-            button:hover {
-                background-color: #45a049;
-            }
-            img {
-                max-width: 100%;
-                height: auto;
-                border: 1px solid #ddd;
-            }
-            #status {
-                margin: 10px 0;
-                font-weight: bold;
-            }
-            .detection-info {
-                margin-top: 10px;
-                padding: 10px;
-                background-color: #f9f9f9;
-                border-radius: 4px;
-                max-height: 200px;
-                overflow-y: auto;
-            }
-        </style>
-    </head>
-    <body>
-        <h1>Object Detection Visualization</h1>
-        <button id="detect-btn">Run Detection</button>
-        <div id="status">Ready</div>
-        <div class="container">
-            <div class="image-container">
-                <h2>Live Video Stream</h2>
-                <img id="live-stream" src="/video_stream" alt="Live video stream">
-            </div>
-            <div class="image-container">
-                <h2>Detection Image</h2>
-                <img id="detection-image" src="" alt="No detection image available">
-            </div>
-            <div class="image-container">
-                <h2>Depth Map</h2>
-                <img id="depth-image" src="" alt="No depth map available">
-            </div>
-        </div>
-        <div class="image-container">
-            <h2>Detection Results</h2>
-            <div id="detection-info" class="detection-info">No detections yet</div>
-        </div>
-
-        <script>
-            document.getElementById('detect-btn').addEventListener('click', async function() {
-                const statusEl = document.getElementById('status');
-                const detectionImageEl = document.getElementById('detection-image');
-                const depthMapEl = document.getElementById('depth-image');
-                const detectionInfoEl = document.getElementById('detection-info');
-                
-                statusEl.textContent = 'Running detection...';
-                
-                try {
-                    const response = await fetch('/detections');
-                    const data = await response.json();
-                    
-                    if (data.status === 'ok') {
-                        statusEl.textContent = 'Detection completed successfully';
-                        
-                        if (data.detection_image) {
-                            detectionImageEl.src = 'data:image/jpeg;base64,' + data.detection_image;
-                        } else {
-                            detectionImageEl.alt = 'No detection image available';
-                            detectionImageEl.src = '';
-                        }
-                        
-                        if (data.depth_map) {
-                            depthMapEl.src = 'data:image/jpeg;base64,' + data.depth_map;
-                        } else {
-                            depthMapEl.alt = 'No depth map available';
-                            depthMapEl.src = '';
-                        }
-                        
-                        if (data.detections && data.detections.length > 0) {
-                            let infoHTML = ['<h3>Found ', String(data.detections.length), ' objects:</h3>', '<ul>'];
-                            data.detections.forEach((det) => {
-                                let li = `<li>${det.label} (confidence: ${det.confidence.toFixed(2)}`;
-                                if (det.distance !== undefined) {
-                                    li += ` - Distance: ${det.distance.toFixed(2)}m`;
-                                }
-                                li += '</li>';
-                                infoHTML.push(li);
-                            });
-                            infoHTML.push('</ul>');
-                            detectionInfoEl.innerHTML = infoHTML.join('');
-                        } else {
-                            detectionInfoEl.textContent = 'No objects detected';
-                        }
-                    } else {
-                        statusEl.textContent = 'Error: ' + (data.error || 'Unknown error');
-                        detectionInfoEl.textContent = 'Detection failed: ' + (data.error || 'Unknown error');
-                    }
-                } catch (error) {
-                    statusEl.textContent = 'Request failed: ' + error.message;
-                    detectionInfoEl.textContent = 'Request failed: ' + error.message;
-                }
-            });
-        </script>
-    </body>
-    </html>
-    '''
-
 import cv2
 import depthai as dai
 import numpy as np
@@ -151,6 +8,7 @@ from flask import Flask, Response, jsonify, request
 import threading
 import uuid
 import paho.mqtt.client as mqtt
+from new_camera_utils import frame_norm, create_placeholder_frame, calculate_distance, visualize_depth, draw_detections, frame_to_base64
 
 MQTT_HOST = '127.0.0.1'
 MQTT_PORT = 1883
@@ -238,62 +96,6 @@ device = None
 frame_lock = threading.Lock()
 depth_lock = threading.Lock()
 running_inference = False
-
-def frame_norm(frame: np.ndarray, bbox: list) -> list:
-    """Normalize bounding box coordinates based on frame size."""
-    norm_vals = np.full(len(bbox), frame.shape[0])
-    norm_vals[::2] = frame.shape[1]
-    return (np.clip(np.array(bbox), 0, 1) * norm_vals).astype(int)
-
-def create_placeholder_frame(message: str = "Connecting to camera...") -> np.ndarray:
-    frame = np.zeros((480, 640, 3), dtype=np.uint8)
-    font = cv2.FONT_HERSHEY_SIMPLEX
-    text = message
-    textsize = cv2.getTextSize(text, font, 1, 2)[0]
-    text_x = (frame.shape[1] - textsize[0]) // 2
-    text_y = (frame.shape[0] + textsize[1]) // 2
-    cv2.putText(frame, text, (text_x, text_y), font, 1, (255, 255, 255), 2)
-    
-    if "in use" in message.lower():
-        instruction = "Please close other applications using the camera"
-        inst_size = cv2.getTextSize(instruction, font, 0.5, 1)[0]
-        inst_x = (frame.shape[1] - inst_size[0]) // 2
-        inst_y = text_y + 40
-        cv2.putText(frame, instruction, (inst_x, inst_y), font, 0.5, (255, 255, 255), 1)
-    
-    return frame
-
-def calculate_distance(depth_map: np.ndarray, bbox: tuple) -> float or None:
-    """Calculate the distance from the depth map based on bounding box."""
-    x1, y1, x2, y2 = bbox
-    
-    x1 = max(0, min(x1, depth_map.shape[1] - 1))
-    y1 = max(0, min(y1, depth_map.shape[0] - 1))
-    x2 = max(0, min(x2, depth_map.shape[1] - 1))
-    y2 = max(0, min(y2, depth_map.shape[0] - 1))
-    
-    center_x, center_y = (x1 + x2) // 2, (y1 + y2) // 2
-    
-    sample_size = 20
-    x_start = max(center_x - sample_size//2, 0)
-    y_start = max(center_y - sample_size//2, 0)
-    x_end = min(center_x + sample_size//2, depth_map.shape[1])
-    y_end = min(center_y + sample_size//2, depth_map.shape[0])
-    
-    if x_end > x_start and y_end > y_start:
-        depth_slice = depth_map[y_start:y_end, x_start:x_end]
-        
-        if depth_slice.size > 0:
-            valid_depths = depth_slice[depth_slice > 0]
-            
-            if len(valid_depths) > 0:
-                median_depth = np.median(valid_depths)
-                
-                distance_meters = median_depth / 1000.0
-                
-                return distance_meters
-    
-    return None
 
 def run_pipeline() -> None:
     """Run the DepthAI pipeline loop, handling frame and depth capture."""
@@ -399,53 +201,6 @@ def generate_frames() -> str:
                    b'Content-Type: image/jpeg\r\n\r\n' + frame_bytes + b'\r\n')
         
         time.sleep(0.1)
-
-def visualize_depth(depth_frame: np.ndarray) -> np.ndarray:
-    depth_colormap = cv2.normalize(depth_frame, None, 0, 255, cv2.NORM_MINMAX)
-    depth_colormap = cv2.applyColorMap(depth_colormap.astype(np.uint8), cv2.COLORMAP_JET)
-    return depth_colormap
-
-def draw_detections(frame: np.ndarray, detections: list) -> np.ndarray:
-    result_frame = frame.copy()
-    
-    colors = [(0, 255, 0), (255, 0, 0), (0, 0, 255), (255, 255, 0), 
-              (0, 255, 255), (255, 0, 255), (128, 128, 0), (0, 128, 128)]
-    
-    for i, detection in enumerate(detections):
-        label = detection["label"]
-        confidence = detection["confidence"]
-        bbox = detection["bbox"]
-        
-        x1, y1, x2, y2 = bbox["x1"], bbox["y1"], bbox["x2"], bbox["y2"]
-        
-        color_idx = hash(label) % len(colors)
-        color = colors[color_idx]
-        
-        cv2.rectangle(result_frame, (x1, y1), (x2, y2), color, 2)
-        
-        label_text = f"{label}: {confidence:.2f}"
-        
-        text_size = cv2.getTextSize(label_text, cv2.FONT_HERSHEY_SIMPLEX, 0.6, 1)[0]
-        
-        rect_y1 = max(0, y1 - text_size[1] - 10)
-        
-        cv2.rectangle(result_frame, (x1, rect_y1), (x1 + text_size[0], y1), color, -1)
-        cv2.putText(result_frame, label_text, (x1, y1 - 5),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 1)
-        
-        if "distance" in detection:
-            distance_text = f"{detection['distance']:.2f}m"
-            cv2.putText(result_frame, distance_text, (x1, y2 + 20),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.6, color, 2)
-    
-    return result_frame
-
-def frame_to_base64(frame: np.ndarray) -> str or None:
-    success, buffer = cv2.imencode('.jpg', frame)
-    if not success:
-        return None
-    encoded_image = base64.b64encode(buffer).decode('utf-8')
-    return encoded_image
 
 @app.route('/video_stream')
 def video_stream() -> Response:
@@ -627,3 +382,146 @@ if __name__ == "__main__":
     pipeline_thread.start()
     
     app.run(host='127.0.0.1', port=8005, debug=False, threaded=True)
+    
+# Note: The HTML string is assumed to be in this file as per the original code.
+html_text = '''
+    <!DOCTYPE html>
+    <html>
+    <head>
+        <title>Detection Visualization</title>
+        <style>
+            body {
+                font-family: Arial, sans-serif;
+                margin: 20px;
+                background-color: #f0f0f0;
+            }
+            .container {
+                display: flex;
+                flex-wrap: wrap;
+                gap: 20px;
+            }
+            .image-container {
+                background-color: white;
+                padding: 10px;
+                border-radius: 5px;
+                box-shadow: 0 2px 5px rgba(0,0,0,0.1);
+            }
+            h2 {
+                margin-top: 0;
+            }
+            button {
+                background-color: #4CAF50;
+                border: none;
+                color: white;
+                padding: 10px 20px;
+                text-align: center;
+                text-decoration: none;
+                display: inline-block;
+                font-size: 16px;
+                margin: 20px 0;
+                cursor: pointer;
+                border-radius: 4px;
+            }
+            button:hover {
+                background-color: #45a049;
+            }
+            img {
+                max-width: 100%;
+                height: auto;
+                border: 1px solid #ddd;
+            }
+            #status {
+                margin: 10px 0;
+                font-weight: bold;
+            }
+            .detection-info {
+                margin-top: 10px;
+                padding: 10px;
+                background-color: #f9f9f9;
+                border-radius: 4px;
+                max-height: 200px;
+                overflow-y: auto;
+            }
+        </style>
+    </head>
+    <body>
+        <h1>Object Detection Visualization</h1>
+        <button id="detect-btn">Run Detection</button>
+        <div id="status">Ready</div>
+        <div class="container">
+            <div class="image-container">
+                <h2>Live Video Stream</h2>
+                <img id="live-stream" src="/video_stream" alt="Live video stream">
+            </div>
+            <div class="image-container">
+                <h2>Detection Image</h2>
+                <img id="detection-image" src="" alt="No detection image available">
+            </div>
+            <div class="image-container">
+                <h2>Depth Map</h2>
+                <img id="depth-image" src="" alt="No depth map available">
+            </div>
+        </div>
+        <div class="image-container">
+            <h2>Detection Results</h2>
+            <div id="detection-info" class="detection-info">No detections yet</div>
+        </div>
+
+        <script>
+            document.getElementById('detect-btn').addEventListener('click', async function() {
+                const statusEl = document.getElementById('status');
+                const detectionImageEl = document.getElementById('detection-image');
+                const depthMapEl = document.getElementById('depth-image');
+                const detectionInfoEl = document.getElementById('detection-info');
+                
+                statusEl.textContent = 'Running detection...';
+                
+                try {
+                    const response = await fetch('/detections');
+                    const data = await response.json();
+                    
+                    if (data.status === 'ok') {
+                        statusEl.textContent = 'Detection completed successfully';
+                        
+                        if (data.detection_image) {
+                            detectionImageEl.src = 'data:image/jpeg;base64,' + data.detection_image;
+                        } else {
+                            detectionImageEl.alt = 'No detection image available';
+                            detectionImageEl.src = '';
+                        }
+                        
+                        if (data.depth_map) {
+                            depthMapEl.src = 'data:image/jpeg;base64,' + data.depth_map;
+                        } else {
+                            depthMapEl.alt = 'No depth map available';
+                            depthMapEl.src = '';
+                        }
+                        
+                        if (data.detections && data.detections.length > 0) {
+                            let infoHTML = ['<h3>Found ', String(data.detections.length), ' objects:</h3>', '<ul>'];
+                            data.detections.forEach((det) => {
+                                let li = `<li>${det.label} (confidence: ${det.confidence.toFixed(2)}`;
+                                if (det.distance !== undefined) {
+                                    li += ` - Distance: ${det.distance.toFixed(2)}m`;
+                                }
+                                li += '</li>';
+                                infoHTML.push(li);
+                            });
+                            infoHTML.push('</ul>');
+                            detectionInfoEl.innerHTML = infoHTML.join('');
+                        } else {
+                            detectionInfoEl.textContent = 'No objects detected';
+                        }
+                    } else {
+                        statusEl.textContent = 'Error: ' + (data.error || 'Unknown error');
+                        detectionInfoEl.textContent = 'Detection failed: ' + (data.error || 'Unknown error');
+                    }
+                } catch (error) {
+                    statusEl.textContent = 'Request failed: ' + error.message;
+                    detectionInfoEl.textContent = 'Request failed: ' + error.message;
+                }
+            });
+        </script>
+    </body>
+    </html>
+    '''
