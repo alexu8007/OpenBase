@@ -1,4 +1,3 @@
-
 from bs4 import BeautifulSoup as bs
 import requests
 import ws
@@ -30,7 +29,7 @@ def fetch_snakes_from_leaderboard() -> List[str]:
     leaderboard_response.raise_for_status()  # Raise an exception for HTTP errors (4xx or 5xx)
     leaderboard_soup = bs(leaderboard_response.text, "html.parser")
     snake_elements = leaderboard_soup.find_all(attrs={"data-snake-id": True})
-    snake_ids = [x.attrs["data-snake-id"] for x in snake_elements]
+    snake_ids = (x.attrs["data-snake-id"] for x in snake_elements)
     return snake_ids
 
 def fetch_snake_recent_games(snake_id: str) -> List[str]:
@@ -58,7 +57,7 @@ def fetch_snake_recent_games(snake_id: str) -> List[str]:
     recent_games_response.raise_for_status()  # Raise an exception for HTTP errors
     recent_games_data = recent_games_response.json()
     # Use .get() with a default empty list to safely handle missing 'recentGames' key
-    recent_games_ids = [x["gameId"] for x in recent_games_data.get("recentGames", [])]
+    recent_games_ids = (x["gameId"] for x in recent_games_data.get("recentGames", []))
     return recent_games_ids
 
 def _process_game_turn_data(turn_data: Dict[str, Any]) -> Dict[str, Any]:
