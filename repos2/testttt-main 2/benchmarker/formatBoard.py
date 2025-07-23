@@ -1,4 +1,3 @@
-
 from typing import List, Dict, Any
 from constants import *
 
@@ -24,25 +23,23 @@ def format_board(snake: Any, snakes: List[Any], food: List[Dict[str, int]]) -> L
         The dimensions are [11][11][3], where 11x11 is the board size and 3 is for the layers.
     """
     # convert snake info to 2d board array
-    board = []
-    for j in range(11):
-        board.append([])
-        for k in range(11):
-            board[j].append([])
-            for l in range(3):
-                board[j][k].append(0)
+    board = [[[0 for _ in range(3)] for _ in range(11)] for _ in range(11)]
     # add snakes
+    def add_snake(board, snake_tail, layer):
+        if snake_tail:
+            head = snake_tail[0]
+            board[head["x"]][head["y"]][layer] = 5
+            for idx, segment in enumerate(snake_tail[1:]):
+                board[segment["x"]][segment["y"]][layer] = 1
+    
     for s in snakes:
         if s.id == snake.id:
             continue
-        board[s.tail[0]["x"]][s.tail[0]["y"]][2] = 5
-        for j in range(len(s.tail)-1):
-            board[s.tail[j+1]["x"]][s.tail[j+1]["y"]][2] = 1
-    # add this snake
-    board[snake.tail[0]["x"]][snake.tail[0]["y"]][1] = 5
-    for j in range(len(snake.tail)-1):
-        board[snake.tail[j+1]["x"]][snake.tail[j+1]["y"]][1] = 1
+        add_snake(board, s.tail, 2)
+    
+    add_snake(board, snake.tail, 1)
+    
     # add food
-    for f in food:
+    for idx, f in enumerate(food):
         board[f["x"]][f["y"]][0] = 1
     return board
