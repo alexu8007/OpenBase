@@ -1,4 +1,3 @@
-
 import msgpack
 import numpy as np
 from typing import List, Dict, Any
@@ -64,15 +63,9 @@ def process_and_save_source_data(source_index: int, total_sources: int) -> None:
     with open(input_filepath, 'rb') as f:
         data: List[Dict[str, Any]] = msgpack.load(f)
 
-    for dir_idx in range(3):
+    for dir_idx, _ in enumerate(range(3)):
         preprocessed_frames: List[Dict[str, Any]] = []
-        for frame in data:
-            # The original code had a loop 'for x in range(dir_idx+1)'
-            # which applied rotations to a 'rotated_frame' variable,
-            # but then discarded its result and appended 'rotateFrame(frame)'
-            # (a single rotation of the original frame) to 'preprocessed'.
-            # We replicate this exact (potentially unintended) behavior.
-            preprocessed_frames.append(rotate_frame(frame))
+        preprocessed_frames = [rotate_frame(frame) for frame in data]
             
         print(f"Source {source_index}, Rotation {dir_idx}, Number of frames {len(preprocessed_frames)}")
         
@@ -86,7 +79,7 @@ def main() -> None:
     It iterates through defined data sources, loads their frames,
     applies rotations, and saves the results to new files.
     """
-    for source_idx in range(SOURCES):
+    for source_idx, _ in enumerate(range(SOURCES)):
         process_and_save_source_data(source_idx, SOURCES)
 
 if __name__ == "__main__":
