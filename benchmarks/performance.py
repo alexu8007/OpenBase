@@ -84,21 +84,24 @@ def _assess_static_performance(codebase_path: str, python_files: List[str]) -> t
                 data = json.loads(proc.stdout)
                 func_records = [f for file in data.get("files", []) for f in file.get("functions", [])]
                 total_funcs = len(func_records)
-                cc_values = [f.get("cyclomatic_complexity", 0) for f in func_records]
-                avg_cc = (sum(cc_values) / total_funcs) if total_funcs else None
-
-                if avg_cc is not None:
+                cc_values = (f.get("cyclomatic_complexity", 0) for f in func_records)  # Line 85 modified
+                if total_funcs > 0:
+                    sum_cc = sum(cc_values)  # First use of generator
+                    avg_cc = sum_cc / total_funcs
                     details.append(f"Average cyclomatic complexity (all languages): {avg_cc:.1f}")
                     # Penalty: 1 point for every 2 points above CC=10
                     if avg_cc > 10:
                         penalties += (avg_cc - 10) / 2
 
                     # High-complexity function penalty
-                    high_cc_funcs = [v for v in cc_values if v > 20]
-                    if high_cc_funcs:
-                        ratio = len(high_cc_funcs) / total_funcs
+                    high_cc_funcs = (v for v in cc_values if v > 20)  # Line 87 modified
+                    high_cc_funcs_list = list(high_cc_funcs)  # Convert to list for len
+                    if high_cc_funcs_list:
+                        ratio = len(high_cc_funcs_list) / total_funcs
                         penalties += ratio * 3  # up to 3-point penalty
-                        details.append(f"{len(high_cc_funcs)} / {total_funcs} functions have CC > 20")
+                        details.append(f"{len(high_cc_funcs_list)} / {total_funcs} functions have CC > 20")
+                else:
+                    avg_cc = None
             else:
                 details.append("[!] lizard failed to analyze the codebase.")
                 avg_cc = None
@@ -119,17 +122,17 @@ def _assess_static_performance(codebase_path: str, python_files: List[str]) -> t
 
         for node in ast.walk(tree):
             if (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute) and node.func.attr == 'insert' and len(node.args) == 2 and hasattr(node.args[0], 'value') and node.args[0].value == 0):
-                details.append(f"Inefficient 'list.insert(0, …)' at {file_path}:{node.lineno}")
+                details.append(''.join(["Inefficient 'list.insert(0, …)' at ", file_path, ":", str(node.lineno)]))  # Line 123 modified
                 anti_patterns_found += 1
             if isinstance(node, (ast.For, ast.While)):
                 for sub_node in ast.walk(node):
                     if isinstance(sub_node, ast.AugAssign) and isinstance(sub_node.op, ast.Add) and isinstance(sub_node.target, ast.Name):
-                        details.append(f"String concatenation in loop at {file_path}:{node.lineno}")
+                        details.append(''.join(["String concatenation in loop at ", file_path, ":", str(node.lineno)]))  # Line 128 modified
                         anti_patterns_found += 0.5
             if isinstance(node, ast.For):
                 for sub_node in ast.walk(node):
                     if isinstance(sub_node, ast.For) and sub_node is not node:
-                        details.append(f"Nested loops (O(n²) risk) at {file_path}:{node.lineno}")
+                        details.append(''.join(["Nested loops (O(n²) risk) at ", file_path, ":", str(node.lineno)]))  # Line 133 modified
                         anti_patterns_found += 0.3
 
     if anti_patterns_found:
@@ -201,7 +204,7 @@ def _assess_dynamic_performance(profile_script: str) -> tuple[float, List[str], 
         avg_time = statistics.mean(execution_times)
         time_std = statistics.stdev(execution_times) if len(execution_times) > 1 else 0
         
-        details.append(f"Avg execution time: {avg_time:.1f}ms (±{time_std:.1f}ms)")
+        details.append(''.join(["Avg execution time: ", str(avg_time), "ms (±", str(time_std), "ms)"]))  # Line 189 modified
         
         # Time-based scoring
         if avg_time < 100:
@@ -223,7 +226,7 @@ def _assess_dynamic_performance(profile_script: str) -> tuple[float, List[str], 
     
     if memory_peaks:
         avg_memory = statistics.mean(memory_peaks)
-        details.append(f"Peak memory usage: {avg_memory:.1f}MB")
+        details.append(''.join(["Peak memory usage: ", str(avg_memory), "MB"]))  # Line 191 modified
         
         # Memory-based scoring (penalize high usage)
         if avg_memory < 50:
@@ -244,4 +247,4 @@ def _assess_dynamic_performance(profile_script: str) -> tuple[float, List[str], 
     # Combined dynamic score
     dynamic_score = (time_score + memory_score) / 2.0
     
-    return dynamic_score, details, metrics 
+    return dynamic_score, details, metrics
