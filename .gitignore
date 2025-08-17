@@ -12,3 +12,11 @@ repos2
 tettettt-main
 reports
 .ruff_cache
+test1file
+\n+# Ensure benchmark run outputs and test sandboxes are ignored
+/runs/
+/testcursor/
+/testgptoss120B/
+/testttt-mainp0/
+/testttt-mainp0mini/
+/testttt-mainp02/

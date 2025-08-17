@@ -1,0 +1,12 @@
+{
+  "models": [
+    "openai/gpt-oss-120b",
+    "moonshotai/kimi-k2"
+  ],
+  "benchmark_folder": "benchmarkv01",
+  "out_dir": "/runs",
+  "skip": "GitHealth,Testability",
+  "weights": {}
+}
+
+

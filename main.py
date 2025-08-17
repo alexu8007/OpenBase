@@ -13,6 +13,11 @@ import json
 from collections import defaultdict
 import os
 import time
+from datetime import datetime
+
+from dotenv import load_dotenv
+
+from llm_tools import perfect_code_with_model
 
 # built-in benchmarks
 from benchmarks import (
@@ -92,6 +97,44 @@ def _analyze_single_codebase(path: Path, skip_set, benchmark_weights):
             raw_scores[name] = result[0] if isinstance(result, tuple) else result
     return raw_scores
 
+
+def _slugify(value: str) -> str:
+    return "".join(ch if ch.isalnum() or ch in ("-", "_") else "-" for ch in value).strip("-")
+
+
+def _copy_tests_for_file(src_file: Path, dest_dir: Path) -> None:
+    """Best-effort copy of co-located tests for a given file into dest_dir/tests.
+
+    Looks for siblings matching test_*.py or *_test.py and a `tests` directory in the same tree level.
+    """
+    try:
+        tests_dir = dest_dir / "tests"
+        tests_dir.mkdir(parents=True, exist_ok=True)
+
+        parent = src_file.parent
+        # Copy sibling tests
+        for cand in parent.glob("test_*.py"):
+            content = cand.read_text()
+            (tests_dir / cand.name).write_text(content)
+        for cand in parent.glob("*_test.py"):
+            content = cand.read_text()
+            (tests_dir / cand.name).write_text(content)
+
+        # If there's an immediate `tests` folder next to the file, copy its simple tests
+        neighbor_tests = parent / "tests"
+        if neighbor_tests.is_dir():
+            for cand in neighbor_tests.rglob("*.py"):
+                rel = cand.relative_to(neighbor_tests)
+                out_path = tests_dir / rel
+                out_path.parent.mkdir(parents=True, exist_ok=True)
+                try:
+                    out_path.write_text(cand.read_text())
+                except Exception:
+                    pass
+    except Exception:
+        # Non-fatal: absence of tests is acceptable; testability benchmark will be skipped by default
+        pass
+
 @app.command()
 def compare_collections(
     folder1: Path = typer.Option(..., "--folder1", help="Directory containing multiple repos (collection 1)"),
@@ -110,7 +153,10 @@ def compare_collections(
         console.print("[bold red]Error: Invalid JSON format for weights.[/bold red]")
         raise typer.Exit(code=1)
 
-    skip_set = {s.strip().capitalize() for s in skip.split(',') if s.strip()}
+    # Normalize skip tokens to internal benchmark display names (e.g., git_health -> GitHealth)
+    def _to_display(name: str) -> str:
+        return name.replace('_', ' ').title().replace(' ', '')
+    skip_set = {_to_display(s.strip()) for s in skip.split(',') if s.strip()}
 
     def _collect(folder, progress, task_id):
         repo_dirs = [d for d in folder.iterdir() if d.is_dir() and not d.name.startswith('.')]
@@ -168,6 +214,205 @@ def compare_collections(
 
 
 @app.command()
+def llm_battle(
+    config: Path = typer.Option(Path("openbase.config.json"), "--config", help="Path to openbase.config.json"),
+):
+    """Run LLM battle using configuration and files from benchmark folder (no flags needed)."""
+    load_dotenv()
+
+    repo_root = Path(__file__).resolve().parent
+    config_path = config if config else (repo_root / "openbase.config.json")
+    if not config_path.exists():
+        console.print("[bold red]Missing openbase.config.json at repo root.[/bold red]")
+        console.print("Example:\n" + json.dumps({
+            "models": ["x-ai/grok-2", "google/gemini-1.5-pro-latest"],
+            "benchmark_folder": "benchmarkv01",
+            "out_dir": "/runs",
+            "skip": "GitHealth,Testability"
+        }, indent=2))
+        raise typer.Exit(code=1)
+
+    try:
+        cfg = json.loads(config_path.read_text())
+    except json.JSONDecodeError:
+        console.print("[bold red]Invalid JSON in openbase.config.json[/bold red]")
+        raise typer.Exit(code=1)
+
+    models_val = cfg.get("models") or cfg.get("model")
+    if isinstance(models_val, str):
+        model_ids = [m.strip() for m in models_val.split(",") if m.strip()]
+    elif isinstance(models_val, list):
+        model_ids = [str(m).strip() for m in models_val if str(m).strip()]
+    else:
+        model_ids = []
+    if len(model_ids) != 2:
+        console.print("[bold red]openbase.config.json must specify exactly 2 models under 'models'.[/bold red]")
+        raise typer.Exit(code=1)
+
+    bench_folder = cfg.get("benchmark_folder", "benchmarkv01")
+    target_dir = (repo_root / bench_folder).resolve()
+    if not target_dir.is_dir():
+        console.print(f"[bold red]Benchmark folder not found:[/bold red] {target_dir}")
+        raise typer.Exit(code=1)
+
+    # Collect all files in the folder (recursive)
+    file_paths = [p for p in target_dir.rglob("*") if p.is_file()]
+    if not file_paths:
+        console.print(f"[bold red]No files found in {target_dir}[/bold red]")
+        raise typer.Exit(code=1)
+
+    # Output directory handling (default to /runs)
+    configured_out = Path(cfg.get("out_dir", "/runs"))
+    out_dir = configured_out
+    try:
+        out_dir.mkdir(parents=True, exist_ok=True)
+    except (PermissionError, OSError) as e:
+        out_dir = repo_root / "runs"
+        out_dir.mkdir(parents=True, exist_ok=True)
+        console.print(f"[yellow]Could not write to {configured_out} ({e}). Falling back to {out_dir}[/yellow]")
+
+    # Skip and weights
+    skip = str(cfg.get("skip", "GitHealth,Testability"))
+    def _to_display(name: str) -> str:
+        return name.replace('_', ' ').title().replace(' ', '')
+    skip_set = {_to_display(s.strip()) for s in skip.split(',') if s.strip()}
+
+    weights_val = cfg.get("weights", {})
+    if isinstance(weights_val, str):
+        try:
+            benchmark_weights = json.loads(weights_val)
+        except json.JSONDecodeError:
+            benchmark_weights = {}
+    elif isinstance(weights_val, dict):
+        benchmark_weights = weights_val
+    else:
+        benchmark_weights = {}
+
+    extra_instructions_path = cfg.get("extra_instructions")
+    extra_text = None
+    if extra_instructions_path:
+        p = Path(extra_instructions_path)
+        if p.exists():
+            extra_text = p.read_text(encoding="utf-8")
+
+    copy_tests = bool(cfg.get("copy_tests", True))
+
+    # Prepare run directories
+    run_id = datetime.utcnow().strftime("%Y%m%d_%H%M%S")
+    run_root = out_dir / "llm_battle" / run_id
+    model_dirs = {}
+    for model in model_ids:
+        mslug = _slugify(model)
+        model_dir = run_root / mslug
+        model_dir.mkdir(parents=True, exist_ok=True)
+        model_dirs[model] = model_dir
+
+    # Run refactors (temperature fixed to 0)
+    console.print(Align.center("[bold blue]🤖 Running LLM refactors[/bold blue]"))
+    with Progress(
+        SpinnerColumn(),
+        TextColumn("[progress.description]{task.description}"),
+        BarColumn(),
+        TextColumn("[progress.percentage]{task.percentage:>3.0f}%"),
+        TimeElapsedColumn(),
+        console=console,
+        transient=True,
+    ) as progress:
+        task = progress.add_task("Generating improved files...", total=len(file_paths) * len(model_ids))
+
+        for file_path in file_paths:
+            try:
+                original_code = file_path.read_text(encoding="utf-8", errors="ignore")
+            except Exception:
+                original_code = ""
+            file_stem = file_path.stem
+            for model in model_ids:
+                out_repo = model_dirs[model] / file_stem
+                out_repo.mkdir(parents=True, exist_ok=True)
+
+                try:
+                    new_code = perfect_code_with_model(
+                        model=model,
+                        code=original_code,
+                        file_name=file_path.name,
+                        temperature=0.0,
+                        extra_instructions=extra_text,
+                    )
+                except Exception as e:
+                    console.print(f"[yellow]Model '{model}' failed on {file_path.name}: {e}[/yellow]")
+                    new_code = original_code
+
+                # Write improved file (flatten nested names if needed)
+                out_file = out_repo / file_path.name
+                try:
+                    out_file.write_text(new_code, encoding="utf-8")
+                except Exception:
+                    out_file = out_repo / file_path.name.replace(os.sep, "_")
+                    out_file.write_text(new_code, encoding="utf-8")
+
+                # Best-effort tests copy for python files
+                if copy_tests and file_path.suffix == ".py":
+                    _copy_tests_for_file(file_path, out_repo)
+
+                progress.advance(task)
+
+    # Analyze collections per model
+    console.print(Align.center("[bold blue]📊 Scoring generated code[/bold blue]"))
+
+    def _collect(folder: Path):
+        repo_dirs = [d for d in folder.iterdir() if d.is_dir() and not d.name.startswith('.')]
+        aggregate = defaultdict(list)
+        for repo in repo_dirs:
+            raw_scores = _analyze_single_codebase(repo, skip_set, benchmark_weights)
+            for k, v in raw_scores.items():
+                aggregate[k].append(v)
+        avg_scores = {k: (sum(vs)/len(vs) if vs else 0.0) for k, vs in aggregate.items()}
+        return avg_scores, len(repo_dirs)
+
+    model1, model2 = model_ids
+    avg1, n1 = _collect(model_dirs[model1])
+    avg2, n2 = _collect(model_dirs[model2])
+
+    console.print(Align.center(f"Comparing [magenta]{_slugify(model1)}[/magenta] ({n1} repos) vs [green]{_slugify(model2)}[/green] ({n2} repos)"))
+    console.print()
+
+    table = Table(title="🏁 LLM Battle - Average Scores Across Files", box=box.ROUNDED)
+    table.add_column("Benchmark", style="cyan")
+    table.add_column(f"🔵 {_slugify(model1)}")
+    table.add_column(f"🟢 {_slugify(model2)}")
+    table.add_column("Winner")
+
+    total1 = total2 = 0.0
+    for name in sorted(set(list(avg1.keys()) + list(avg2.keys()))):
+        score1 = avg1.get(name, 0.0)
+        score2 = avg2.get(name, 0.0)
+        weight = benchmark_weights.get(name, 1.0)
+        total1 += score1 * weight
+        total2 += score2 * weight
+        winner = "🔵" if score1 > score2 else ("🟢" if score2 > score1 else "🤝")
+        table.add_row(name, f"{score1:.2f}", f"{score2:.2f}", winner)
+
+    table.add_row("", "", "", "")
+    table.add_row("TOTAL", f"{total1:.2f}", f"{total2:.2f}", "🔵" if total1 > total2 else ("🟢" if total2 > total1 else "🤝"))
+    console.print(table)
+
+    # Write summary JSON
+    export_path = run_root / "summary.json"
+    summary = {
+        "run_root": str(run_root),
+        "model1": model1,
+        "model2": model2,
+        "avg_scores_model1": avg1,
+        "avg_scores_model2": avg2,
+        "total1": total1,
+        "total2": total2,
+        "skip": list(skip_set),
+        "weights": benchmark_weights,
+        "files": [str(p) for p in file_paths],
+    }
+    export_path.write_text(json.dumps(summary, indent=2))
+    console.print(f"[green]Saved run to {export_path.parent}")
+
 def compare(
     codebase1: Path = typer.Option(..., "--codebase1", "-c1", help="Path to the first codebase."),
     codebase2: Path = typer.Option(..., "--codebase2", "-c2", help="Path to the second codebase."),

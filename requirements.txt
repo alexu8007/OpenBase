@@ -18,3 +18,11 @@ mypy
 pytest-cov
 pyyaml
 lizard 
+python-dotenv
+litellm>=1.35.0
+fastapi
+starlette
+pydantic
+httpx
+anyio
+requests
