@@ -5,8 +5,33 @@ from .utils import get_python_files, parse_file
 
 def assess_documentation(codebase_path: str):
     """
-    Assesses the documentation of a codebase.
-    - Checks for docstrings in modules, classes, and functions.
+    Assess documentation coverage and quality for a Python codebase.
+
+    This function walks through all Python files discovered by get_python_files,
+    parses each file into an AST, and inspects modules, classes, and functions
+    for the presence and basic quality of docstrings.
+
+    Scoring:
+    - Coverage component: percentage of documentable entities (modules, classes,
+      functions) that have docstrings, mapped to a 0-10 scale (100% -> 10).
+    - Quality component: fraction of those docstrings that pass the internal
+      _good_docstring heuristic, mapped to 0-10.
+    - Final score: average of coverage and quality components, clamped to [0, 10].
+
+    Returns:
+    - tuple(float, list[str]):
+      - score: float between 0 and 10 inclusive representing combined documentation score.
+      - details: list of human-readable messages describing findings and detected issues.
+
+    Parameters:
+    - codebase_path: path to the root of the codebase to analyze.
+
+    Notes:
+    - The function intentionally treats modules, classes, and functions as
+      documentable entities. Private vs public is not distinguished here; the
+      heuristic only aims to detect presence and some structural qualities of
+      docstrings. This is a lightweight, static check intended to improve
+      documentation coverage, not to replace human review.
     """
     python_files = get_python_files(codebase_path)
     if not python_files:
@@ -66,12 +91,27 @@ def assess_documentation(codebase_path: str):
 # --------------------------------------------------
 
 def _good_docstring(ds: str) -> bool:
-    """Heuristic: multiline and contains Args/Parameters or Returns, or >50 chars."""
-    raw_lines = ds.splitlines()
-    non_blank_lines = [ln.strip() for ln in raw_lines if ln.strip()]
+    """
+    Simple heuristic to decide if a docstring is "good".
 
-    # Must have at least summary + description lines
-    if len(non_blank_lines) < 3:
+    Heuristic rules:
+    - Must contain at least 3 non-blank lines (typically: short summary, blank line, and a description).
+    - Must not have more than 5 consecutive blank lines (to avoid excessive vertical spacing).
+    - Must mention both argument-like sections and a returns section, e.g. "Args:"/"Parameters:" and "Returns:".
+
+    The heuristic is intentionally conservative: it favors docstrings that are
+    structured (multi-line) and include both input and output descriptions.
+    This function is a light-weight static check and does not attempt to
+    validate content beyond these surface signals.
+    """
+    raw_lines = ds.splitlines()
+
+    # Use a generator to count non-blank lines to avoid building a potentially
+    # large intermediate list when analyzing very long docstrings.
+    non_blank_count = sum(1 for ln in raw_lines if ln.strip())
+
+    # Must have at least summary + description lines (conservative threshold).
+    if non_blank_count < 3:
         return False
 
     # Heuristic 2: reject if more than 5 consecutive blank lines (excessive vertical space)
@@ -90,7 +130,10 @@ def _good_docstring(ds: str) -> bool:
         return False
 
     lowered = ds.lower()
+    # Detect common parameter section markers. We check both "args:" and "parameters:"
+    # to be tolerant of different docstring styles (Google vs NumPy/Sphinx-like).
     has_args = any(k in lowered for k in ("args:", "parameters:"))
+    # Detect returns section marker.
     has_returns = "returns:" in lowered
 
-    return has_args and has_returns 
+    return has_args and has_returns

@@ -12,7 +12,7 @@ from __future__ import annotations
 import math
 import random
 import time
-from typing import List
+from typing import Iterator, List
 
 from benchmarkv01.db_access import (
     iter_posts_streaming,
@@ -22,24 +22,33 @@ from benchmarkv01.db_access import (
 
 
 def cpu_heavy(n: int = 50_000) -> float:
-    total = 0.0
-    for i in range(1, n):
-        total += math.sin(i) * math.cos(i / 3.0)
-    return total
+    """Perform CPU-bound mathematical work and return the accumulated result.
+
+    This function iterates over a range of values and computes a trigonometric
+    expression for each value to generate a measurable CPU workload.
+    """
+    accumulated_total = 0.0
+    for value in range(1, n):
+        accumulated_total += math.sin(value) * math.cos(value / 3.0)
+    return accumulated_total
 
 
-def allocate_memory(num_lists: int = 50, list_size: int = 1_000) -> List[List[int]]:
-    data: List[List[int]] = []
-    for _ in range(num_lists):
-        data.append([random.randint(0, 1000) for _ in range(list_size)])
-    return data
+def allocate_memory(num_lists: int = 50, list_size: int = 1_000) -> Iterator[List[int]]:
+    """Yield lists of random integers to simulate memory allocations.
+
+    Yields one list at a time to avoid constructing all lists in memory at once,
+    which helps when profiling or working with larger datasets.
+    """
+    for list_index in range(num_lists):
+        yield [random.randint(0, 1000) for _ in range(list_size)]
 
 
 def main() -> None:
+    """Run a small benchmark workload exercising CPU, memory, and I/O-like waits."""
     # CPU work
     _ = cpu_heavy()
 
-    # Memory allocations
+    # Memory allocations (streamed)
     data = allocate_memory()
 
     # Simulate N+1 and prefetched patterns
@@ -47,7 +56,7 @@ def main() -> None:
     _ = load_posts_with_authors_prefetched()
 
     # Simulate streaming iteration
-    for _batch in iter_posts_streaming():
+    for batch in iter_posts_streaming():
         pass
 
     # Simulate small I/O wait

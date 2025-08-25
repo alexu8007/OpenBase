@@ -2,10 +2,14 @@ import ast
 import os
 from pathlib import Path
 from typing import Optional
+import logging
 
 SUPPORTED_LANGUAGES = {"any"}
 
 from .utils import get_python_files, parse_file
+
+logger = logging.getLogger(__name__)
+
 
 def assess_scalability(codebase_path: str):
     """
@@ -50,8 +54,8 @@ def assess_scalability(codebase_path: str):
         try:
             with open(file_path, 'r', encoding='utf-8') as f:
                 file_content = f.read().lower()
-        except:
-            pass
+        except (OSError, UnicodeDecodeError) as e:
+            logger.warning("Failed to read file %s: %s", file_path, e)
 
         for node in ast.walk(tree):
             # Check imports
@@ -272,7 +276,8 @@ def _analyze_dependencies(python_files, codebase_path: str) -> float:
             rel_path = os.path.relpath(file_path, codebase_path)
             import_graph[rel_path] = file_imports
             
-        except:
+        except (OSError, SyntaxError, UnicodeDecodeError) as e:
+            logger.exception("Error analyzing dependencies for file %s: %s", file_path, e)
             continue
     
     # Low coupling bonus (more external than internal dependencies)
@@ -346,7 +351,8 @@ def _analyze_design_patterns(python_files) -> float:
                     # Check for context managers
                     if '__enter__' in node.name or '__exit__' in node.name:
                         context_managers += 1
-        except:
+        except (OSError, SyntaxError, UnicodeDecodeError) as e:
+            logger.exception("Error analyzing design patterns for file %s: %s", file_path, e)
             continue
     
     # Design pattern bonuses
@@ -388,7 +394,8 @@ def _analyze_data_flow(python_files) -> float:
             if 'pipeline' in content or 'process' in content: has_pipeline_pattern = True
             if 'async def' in content and ('process' in content or 'handle' in content): async_data_processing = True
             
-        except:
+        except (OSError, UnicodeDecodeError) as e:
+            logger.exception("Error analyzing data flow for file %s: %s", file_path, e)
             continue
     
     # Data flow efficiency bonuses
@@ -402,4 +409,60 @@ def _analyze_data_flow(python_files) -> float:
     return min(1.5, score)
 
 
- 
+import unittest
+import tempfile
+import stat
+
+
+class RobustnessFailurePathTests(unittest.TestCase):
+    def test_analyze_dependencies_handles_syntax_error(self):
+        with tempfile.TemporaryDirectory() as td:
+            good = os.path.join(td, "good.py")
+            bad = os.path.join(td, "bad.py")
+            with open(good, "w", encoding="utf-8") as f:
+                f.write("import os\n")
+            with open(bad, "w", encoding="utf-8") as f:
+                f.write("def foo(:\n")  # Syntax error
+            # Should not raise
+            score = _analyze_dependencies([good, bad], td)
+            self.assertIsInstance(score, float)
+
+    def test_analyze_design_patterns_handles_unreadable_file(self):
+        with tempfile.TemporaryDirectory() as td:
+            good = os.path.join(td, "good2.py")
+            unreadable = os.path.join(td, "unreadable.py")
+            with open(good, "w", encoding="utf-8") as f:
+                f.write("class MyClass:\n    pass\n")
+            with open(unreadable, "w", encoding="utf-8") as f:
+                f.write("class Broken:\n    def __init__(self):\n        pass\n")
+            # make unreadable if possible
+            try:
+                os.chmod(unreadable, 0)
+            except Exception:
+                # ignore platforms where chmod may not behave as expected
+                pass
+            try:
+                score = _analyze_design_patterns([good, unreadable])
+                self.assertIsInstance(score, float)
+            finally:
+                # restore permissions to allow cleanup on platforms where chmod worked
+                try:
+                    os.chmod(unreadable, stat.S_IWRITE)
+                except Exception:
+                    pass
+
+    def test_analyze_data_flow_handles_directory_in_list(self):
+        with tempfile.TemporaryDirectory() as td:
+            file1 = os.path.join(td, "f1.py")
+            with open(file1, "w", encoding="utf-8") as f:
+                f.write("def gen():\n    yield 1\n")
+            # include a directory path to cause IsADirectoryError on open
+            dirpath = os.path.join(td, "subdir")
+            os.mkdir(dirpath)
+            score = _analyze_data_flow([file1, dirpath])
+            self.assertIsInstance(score, float)
+
+
+if __name__ == "__main__":
+    logging.basicConfig(level=logging.DEBUG)
+    unittest.main()
