@@ -12,11 +12,62 @@ from typing import List, Dict, Any
 from .utils import get_python_files, parse_file
 from .stats_utils import BenchmarkResult, calculate_confidence_interval, adjust_score_for_size, get_codebase_size_bucket
 
+def _is_valid_path(p: str) -> bool:
+    """
+    Basic validation for filesystem paths used as subprocess arguments.
+    Ensures p is a string, contains no null bytes, and resolves to an existing path.
+    """
+    if not isinstance(p, str):
+        return False
+    if "\x00" in p:
+        return False
+    try:
+        abs_p = os.path.abspath(p)
+    except Exception:
+        return False
+    return os.path.exists(abs_p)
+
+def _validate_subprocess_cmd(cmd: List[str]) -> None:
+    """
+    Validate a subprocess command list before execution.
+    Expectations / safety:
+    - cmd must be a non-empty list/tuple of strings.
+    - No element may contain a null byte.
+    - The list form is required to avoid shell interpretation; shell=True is not used.
+    Calling code should handle exceptions raised here and avoid executing if validation fails.
+    """
+    if not isinstance(cmd, (list, tuple)) or len(cmd) == 0:
+        raise ValueError("subprocess command must be a non-empty list")
+    for i, part in enumerate(cmd):
+        if not isinstance(part, str):
+            raise ValueError(f"subprocess command element at index {i} is not a string")
+        if "\x00" in part:
+            raise ValueError("subprocess command elements must not contain null bytes")
+
+def _safe_run(cmd: List[str], **kwargs) -> subprocess.CompletedProcess:
+    """
+    Wrapper around subprocess.run that validates the command list to avoid shell injection
+    risks. This enforces using argument lists (no shell=True) and rejects invalid elements.
+    """
+    _validate_subprocess_cmd(cmd)
+    # Explicitly avoid passing shell=True through kwargs
+    if kwargs.get("shell", False):
+        raise ValueError("shell=True is not allowed; use an argument list instead")
+    return subprocess.run(cmd, **kwargs)
+
 def assess_performance(codebase_path: str) -> BenchmarkResult:
     """
     Hybrid static + dynamic performance assessment.
     Combines anti-pattern detection with runtime profiling.
+
+    Safety expectations:
+    - codebase_path must be an existing directory path. This is validated to avoid
+      passing user-controlled invalid paths to subprocesses later.
     """
+    # Validate codebase_path early (defensive)
+    if not isinstance(codebase_path, str) or "\x00" in codebase_path or not os.path.exists(codebase_path) or not os.path.isdir(codebase_path):
+        return BenchmarkResult(0.0, ["Invalid codebase_path provided; must be an existing directory."])
+
     python_files = get_python_files(codebase_path)
     if not python_files:
         return BenchmarkResult(0.0, ["No Python files found."])
@@ -65,7 +116,13 @@ def assess_performance(codebase_path: str) -> BenchmarkResult:
 
 
 def _assess_static_performance(codebase_path: str, python_files: List[str]) -> tuple[float, List[str]]:
-    """Language-agnostic static performance heuristics via Lizard + optional Python anti-pattern checks."""
+    """Language-agnostic static performance heuristics via Lizard + optional Python anti-pattern checks.
+
+    Safety expectations for subprocess usage:
+    - Calls to external tool 'lizard' are executed via argument lists (no shell) and validated
+      to ensure each argument is a string without null bytes. The presence of the lizard
+      executable is checked before invocation.
+    """
     details: List[str] = []
     penalties = 0.0
 
@@ -79,30 +136,39 @@ def _assess_static_performance(codebase_path: str, python_files: List[str]) -> t
         total_funcs = 0
     else:
         try:
-            proc = subprocess.run([lizard_executable, "-j", codebase_path], capture_output=True, text=True, check=False)
-            if proc.returncode == 0:
-                data = json.loads(proc.stdout)
-                func_records = [f for file in data.get("files", []) for f in file.get("functions", [])]
-                total_funcs = len(func_records)
-                cc_values = [f.get("cyclomatic_complexity", 0) for f in func_records]
-                avg_cc = (sum(cc_values) / total_funcs) if total_funcs else None
-
-                if avg_cc is not None:
-                    details.append(f"Average cyclomatic complexity (all languages): {avg_cc:.1f}")
-                    # Penalty: 1 point for every 2 points above CC=10
-                    if avg_cc > 10:
-                        penalties += (avg_cc - 10) / 2
-
-                    # High-complexity function penalty
-                    high_cc_funcs = [v for v in cc_values if v > 20]
-                    if high_cc_funcs:
-                        ratio = len(high_cc_funcs) / total_funcs
-                        penalties += ratio * 3  # up to 3-point penalty
-                        details.append(f"{len(high_cc_funcs)} / {total_funcs} functions have CC > 20")
-            else:
-                details.append("[!] lizard failed to analyze the codebase.")
+            # Use validated argument list to avoid shell=True and injection risks
+            cmd = [lizard_executable, "-j", codebase_path]
+            try:
+                _validate_subprocess_cmd(cmd)
+            except ValueError as ve:
+                details.append(f"[!] lizard command validation failed: {ve}")
                 avg_cc = None
                 total_funcs = 0
+            else:
+                proc = _safe_run(cmd, capture_output=True, text=True, check=False)
+                if proc.returncode == 0:
+                    data = json.loads(proc.stdout)
+                    func_records = [f for file in data.get("files", []) for f in file.get("functions", [])]
+                    total_funcs = len(func_records)
+                    cc_values = [f.get("cyclomatic_complexity", 0) for f in func_records]
+                    avg_cc = (sum(cc_values) / total_funcs) if total_funcs else None
+
+                    if avg_cc is not None:
+                        details.append(f"Average cyclomatic complexity (all languages): {avg_cc:.1f}")
+                        # Penalty: 1 point for every 2 points above CC=10
+                        if avg_cc > 10:
+                            penalties += (avg_cc - 10) / 2
+
+                        # High-complexity function penalty
+                        high_cc_funcs = [v for v in cc_values if v > 20]
+                        if high_cc_funcs:
+                            ratio = len(high_cc_funcs) / total_funcs
+                            penalties += ratio * 3  # up to 3-point penalty
+                            details.append(f"{len(high_cc_funcs)} / {total_funcs} functions have CC > 20")
+                else:
+                    details.append("[!] lizard failed to analyze the codebase.")
+                    avg_cc = None
+                    total_funcs = 0
         except Exception as e:
             details.append(f"[!] lizard execution error: {e}")
             avg_cc = None
@@ -145,7 +211,18 @@ def _assess_static_performance(codebase_path: str, python_files: List[str]) -> t
 
 
 def _assess_dynamic_performance(profile_script: str) -> tuple[float, List[str], Dict[str, Any]]:
-    """Dynamic runtime profiling with multiple samples."""
+    """Dynamic runtime profiling with multiple samples.
+
+    Safety expectations:
+    - profile_script must be an existing file path. This function validates the path
+      and rejects invalid inputs to prevent accidental execution of unintended targets.
+    - All subprocess invocations use argument lists (no shell=True) and the command lists
+      are validated to ensure elements are strings without null bytes.
+    """
+    # Validate profile_script defensively
+    if not isinstance(profile_script, str) or "\x00" in profile_script or not os.path.exists(profile_script) or not os.path.isfile(profile_script):
+        raise ValueError("profile_script must be an existing file path")
+
     details = []
     metrics = {}
     
@@ -160,9 +237,13 @@ def _assess_dynamic_performance(profile_script: str) -> tuple[float, List[str], 
         
         try:
             cmd = ["pyinstrument", "--json", "-o", time_report_path, profile_script]
-            proc = subprocess.run(cmd, capture_output=True, text=True, check=False)
+            try:
+                _validate_subprocess_cmd(cmd)
+                proc = _safe_run(cmd, capture_output=True, text=True, check=False)
+            except Exception:
+                proc = None
             
-            if proc.returncode == 0 and os.path.exists(time_report_path):
+            if proc and proc.returncode == 0 and os.path.exists(time_report_path):
                 with open(time_report_path) as f:
                     time_data = json.load(f)
                 execution_time = time_data.get("duration", 0) * 1000  # ms
@@ -176,9 +257,13 @@ def _assess_dynamic_performance(profile_script: str) -> tuple[float, List[str], 
         # === MEMORY PROFILING ===
         try:
             cmd = ["python", "-m", "memory_profiler", profile_script]
-            proc = subprocess.run(cmd, capture_output=True, text=True, check=False)
+            try:
+                _validate_subprocess_cmd(cmd)
+                proc = _safe_run(cmd, capture_output=True, text=True, check=False)
+            except Exception:
+                proc = None
             
-            if proc.returncode == 0:
+            if proc and proc.returncode == 0:
                 # Parse memory_profiler output for peak usage
                 lines = proc.stdout.split('\n')
                 for line in lines:
@@ -244,4 +329,4 @@ def _assess_dynamic_performance(profile_script: str) -> tuple[float, List[str], 
     # Combined dynamic score
     dynamic_score = (time_score + memory_score) / 2.0
     
-    return dynamic_score, details, metrics 
+    return dynamic_score, details, metrics
