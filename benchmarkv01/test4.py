@@ -46,9 +46,9 @@ Focus only on the most critical and innovative ideas. Avoid lengthy explanations
 **Project Context:**
 
 **FULL CODEBASE CONTENT:**
-```
+
 {full_codebase_content}
-```
+
 
 **FILE INVENTORY:**
 {file_inventory}
@@ -93,4 +93,4 @@ Focus only on the most critical and innovative ideas. Avoid lengthy explanations
             return response
         except Exception as e:
             logger.error(f"Architect Agent failed to generate recommendations: {e}", exc_info=True)
-            return f"### Error: Could not generate architectural recommendations.\nAn unexpected error occurred: {e}" 
+            return f"### Error: Could not generate architectural recommendations.\nAn unexpected error occurred: {e}"
