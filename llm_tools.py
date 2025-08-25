@@ -25,16 +25,26 @@ except Exception as exc:  # pragma: no cover - optional runtime dependency
     completion = None  # type: ignore
 
 
-_CODE_BLOCK_RE = re.compile(r"```[a-zA-Z0-9+\-_.]*\n([\s\S]*?)```", re.MULTILINE)
+# Matches fenced code blocks and captures their inner contents (non-greedy)
+_CODE_BLOCK_RE = re.compile(r"[a-zA-Z0-9+\-_.]*\n([\s\S]*?)", re.MULTILINE)
 
 
 def extract_code_from_text(text: str) -> str:
     """Extract the first fenced code block from an LLM response.
 
-    Falls back to returning the raw text if fenced block is not found.
+    If a fenced code block (lang\n...) is found, return its inner contents
+    trimmed of leading/trailing whitespace. Otherwise, return the original text
+    trimmed of whitespace.
+
+    Args:
+        text: The text to search for a fenced code block.
+
+    Returns:
+        The extracted code string or the trimmed original text if no code block is found.
     """
     if not text:
         return ""
+    # Use compiled regex to find the first fenced code block and return its capture group.
     match = _CODE_BLOCK_RE.search(text)
     if match:
         return match.group(1).strip()
@@ -51,21 +61,28 @@ def perfect_code_with_model(
 ) -> str:
     """Ask the specified model to "perfect" a single source file and return the new code.
 
-    Parameters
-    - model: LiteLLM model string, e.g. "openai/gpt-4o-mini", "anthropic/claude-3-5-sonnet-20240620",
-             "gemini/gemini-1.5-pro", "groq/llama3-70b-8192", etc.
-    - code: original source code
-    - file_name: used for context only
-    - temperature: creativity control
-    - extra_instructions: optional additional guidance appended to the prompt
+    This function routes requests through OpenRouter when OPENROUTER_API_KEY is present
+    to ensure the LiteLLM model string is properly prefixed and extra headers are set.
+
+    Args:
+        model: LiteLLM model string, e.g. "openai/gpt-4o-mini", "anthropic/claude-3-5-sonnet-20240620",
+               "gemini/gemini-1.5-pro", "groq/llama3-70b-8192", etc.
+        code: Original source code to be perfected.
+        file_name: Name of the file being perfected (context only).
+        temperature: Creativity control for the LLM.
+        extra_instructions: Optional additional guidance appended to the prompt.
+
+    Returns:
+        The perfected source code returned by the model, or the original code on failure.
     """
     if completion is None:
         raise RuntimeError(
             "litellm is not installed. Please run: pip install litellm"
         )
 
+    # System prompt instructing the model on the goals and checks to perform.
     system_msg = (
-        "You are a senior software engineer tasked with refactoring code without breaking tests. ",
+        "You are a senior software engineer tasked with refactoring code without breaking tests. "
         """please perfect based off of the following **1. READABILITY AND CLARITY TASKS:**
 - Benchmark: Code should be self-explanatory, with clear naming conventions and logical structure.
 - Look for: unclear variable names, missing comments on complex logic, poor formatting
@@ -125,18 +142,18 @@ def perfect_code_with_model(
 **10. ARCHITECTURE TASKS (TypeScript/JavaScript):**
 - Benchmark: Codebase follows scalable, modular, and maintainable front-end architecture principles
 - Look for: oversized React/TSX components (>300 LOC), tight coupling between UI layers, scattered utilities, excessive prop-drilling, inconsistent folder structure, missing separation of concerns
-- Create tasks for: Splitting large components, extracting reusable hooks or utilities, reorganizing files into feature-based folders, adopting atomic design layers, introducing Context/ state-management to replace deep prop chains, extracting UI sub-components, enforcing clear import boundaries
+- Create tasks for: Splitting large components, extracting reusable hooks or utilities, reorganizing files into feature-based folders, adopting atomic design layers, extracting UI sub-components, enforcing clear import boundaries
 - Example task: "Improve architecture in src/components/Sidebar.tsx: split 700-line component into SidebarMain.tsx, SidebarItem.tsx, SidebarUtils.ts; move to components/sidebar/ folder; introduce React Context for shared state; add barrel export index.ts"
 """
     )
 
-    user_msg = (
-        f"Perfect this code file: {file_name}.\n\n"
-        "Original code:\n" + code
-    )
-
+    # Build the user message efficiently using join to avoid repeated concatenation
+    initial_user_message = f"Perfect this code file: {file_name}.\n\nOriginal code:\n{code}"
     if extra_instructions:
-        user_msg = extra_instructions.strip() + "\n\n" + user_msg
+        # extra_instructions should be placed before the main prompt; strip incidental whitespace
+        user_msg = "\n\n".join([extra_instructions.strip(), initial_user_message])
+    else:
+        user_msg = initial_user_message
 
     # Route via OpenRouter if OPENROUTER_API_KEY is present
     api_kwargs = {}
@@ -145,6 +162,7 @@ def perfect_code_with_model(
         # Ensure model is prefixed for LiteLLM's provider router
         if not model.startswith("openrouter/"):
             model = f"openrouter/{model}"
+        # Provide recommended headers and base URL for OpenRouter routing
         api_kwargs = {
             "api_key": openrouter_key,
             "api_base": os.environ.get("OPENROUTER_API_BASE", "https://openrouter.ai/api/v1"),
@@ -155,7 +173,8 @@ def perfect_code_with_model(
             },
         }
 
-    resp = completion(
+    # Call the unified completion interface
+    response = completion(
         model=model,
         messages=[
             {"role": "system", "content": system_msg},
@@ -166,12 +185,12 @@ def perfect_code_with_model(
     )
 
     try:
-        content = resp["choices"][0]["message"]["content"]  # type: ignore[index]
+        # Typical shape: response["choices"][0]["message"]["content"]
+        content = response["choices"][0]["message"]["content"]  # type: ignore[index]
     except Exception:
-        # Best-effort fallback to a few likely shapes
-        content = getattr(resp, "choices", [{}])[0].get("message", {}).get("content", "")  # type: ignore[attr-defined]
+        # Best-effort fallback to a few likely alternative shapes; keep robust access without raising
+        # Use getattr to support objects with attribute-style access as well.
+        content = getattr(response, "choices", [{}])[0].get("message", {}).get("content", "")  # type: ignore[attr-defined]
 
     new_code = extract_code_from_text(content)
     return new_code or code
-
-
