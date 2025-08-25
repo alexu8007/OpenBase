@@ -1,0 +1,659 @@
+import os
+import json
+from typing import Dict, List, Tuple, Optional
+
+
+def detect_existing_configs(repo_path: str = ".") -> Dict[str, bool]:
+    """
+    Inspect the repository root for common linting and CI configuration files.
+
+    Args:
+        repo_path: Path to repository root (default current directory).
+
+    Returns:
+        A mapping of config filename -> presence (True/False).
+    """
+    common_configs = [
+        ".github/workflows",
+        ".pre-commit-config.yaml",
+        "pyproject.toml",
+        "setup.cfg",
+        "tox.ini",
+        "requirements.txt",
+        "Pipfile",
+        "requirements-dev.txt",
+        ".flake8",
+        "mypy.ini",
+        "pytest.ini",
+        ".gitlab-ci.yml",
+        ".circleci/config.yml",
+    ]
+    result: Dict[str, bool] = {}
+    for cfg in common_configs:
+        result[cfg] = os.path.exists(os.path.join(repo_path, cfg))
+    return result
+
+
+def compose_github_actions_workflow() -> str:
+    """
+    Generate a recommended GitHub Actions workflow YAML as a string.
+    This workflow is a plan and is NOT applied to the repository by this script.
+
+    The workflow includes:
+    - Python setup
+    - Environment bootstrap
+    - Linting (ruff/flake8), formatting (black check), type checking (mypy)
+    - Complexity and maintainability checks (radon + lizard), failing thresholds enforced
+    - Unit tests (pytest)
+    - Security scans: semgrep (SAST), bandit (SAST), pip-audit (SCA) with immediate fail-on-high/critical
+      and scheduled weekly full semgrep scans for low/medium cadence.
+    - Findings are summarized and the pipeline fails on CRITICAL/HIGH severities to enforce immediate remediation.
+
+    Returns:
+        A YAML string representing the CI workflow.
+    """
+    workflow = """name: CI - Lint, Typecheck, Complexity, Test, Security
+
+on:
+  push:
+    branches: [ main, master ]
+  pull_request:
+    branches: [ main, master ]
+  schedule:
+    # Weekly scheduled scan for deeper security/full-scan cadence
+    - cron: '0 3 * * 1'  # every Monday at 03:00 UTC
+  workflow_dispatch:
+
+jobs:
+  ci:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        python-version: [3.9, 3.10, 3.11]
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt || true
+          pip install ruff black mypy radon lizard pytest semgrep bandit pip-audit
+
+      - name: Ruff lint
+        run: |
+          # Ruff can act as a fast linter; use configuration in pyproject.toml if present
+          ruff check .
+
+      - name: Black check
+        run: |
+          black --check .
+
+      - name: Mypy type check
+        run: |
+          mypy .
+
+      - name: Complexity & Maintainability checks
+        run: |
+          # Fail if maintainability index < 70 for any module
+          python - <<'PY'
+import sys
+from radon.metrics import mi_visit
+from radon.visitors import CodeBlock
+from radon.complexity import cc_visit
+import pathlib
+threshold_mi = 70.0
+threshold_cc = 15
+failed = []
+for path in pathlib.Path('.').rglob('*.py'):
+    try:
+        src = path.read_text(encoding='utf8')
+        mi = mi_visit(src, True)
+        if mi < threshold_mi:
+            failed.append(f\"MI_FAIL: {path} -> {mi:.1f}\")
+        # Check cognitive/cyclomatic complexity per function/class via cc_visit
+        blocks = cc_visit(src)
+        for block in blocks:
+            if getattr(block, 'complexity', 0) > threshold_cc:
+                failed.append(f\"CC_FAIL: {path}:{block.lineno} {block.name} -> {block.complexity}\")
+    except Exception as e:
+        print(f\"Skipping {path}: {e}\")
+if failed:
+    print(\"Complexity/Maintainability checks failed:\\n\" + \"\\n\".join(failed))
+    sys.exit(2)
+print(\"Complexity/Maintainability checks passed.\")
+PY
+
+      - name: Run tests
+        run: |
+          pytest -q
+
+      - name: Security scans (bandit, semgrep, pip-audit)
+        continue-on-error: false
+        run: |
+          set -euo pipefail
+          echo "Running bandit..."
+          bandit -r -f json -o bandit_results.json || true
+          echo "Running semgrep (fast SAST)..."
+          # Use --config auto for language-aware default rules; projects can provide .semgrep.yml for customization
+          semgrep --config auto --json --output semgrep_results.json || true
+          echo "Running pip-audit (SCA) to detect vulnerable dependencies..."
+          pip-audit --format=json --output pip_audit_results.json || true
+
+          # Aggregate results and enforce fail-on-high/critical policy
+          python - <<'PY'
+import json, sys, pathlib
+
+def extract_severities_from_bandit(path):
+    try:
+        data = json.loads(path.read_text(encoding='utf8'))
+        for r in data.get('results', []):
+            sev = r.get('issue_severity') or r.get('severity') or ''
+            yield str(sev)
+    except Exception:
+        return
+
+def extract_severities_from_semgrep(path):
+    try:
+        data = json.loads(path.read_text(encoding='utf8'))
+        # semgrep v2 uses 'results' list; each result may have 'extra' with 'severity' or 'metadata'
+        for r in data.get('results', []):
+            sev = ''
+            extra = r.get('extra', {}) or {}
+            if isinstance(extra, dict):
+                sev = extra.get('severity') or extra.get('severity_name') or ''
+            if not sev:
+                sev = r.get('severity') or r.get('check_id') or ''
+            yield str(sev)
+    except Exception:
+        return
+
+def extract_severities_from_pip_audit(path):
+    try:
+        data = json.loads(path.read_text(encoding='utf8'))
+        # pip-audit JSON may contain a list of vulnerabilities under 'vulnerabilities' or be a list at root
+        items = []
+        if isinstance(data, dict):
+            items = data.get('vulns') or data.get('vulnerabilities') or data.get('vulns', []) or []
+        elif isinstance(data, list):
+            items = data
+        for v in items:
+            # try multiple potential shapes
+            sev = v.get('vuln', {}).get('severity') if isinstance(v, dict) else ''
+            if not sev:
+                sev = v.get('severity') or v.get('VULN_SEVERITY') or ''
+            yield str(sev)
+    except Exception:
+        return
+
+paths = {
+    'bandit': pathlib.Path('bandit_results.json'),
+    'semgrep': pathlib.Path('semgrep_results.json'),
+    'pip_audit': pathlib.Path('pip_audit_results.json'),
+}
+counts = {'critical':0, 'high':0, 'medium':0, 'low':0}
+for name, p in paths.items():
+    if not p.exists():
+        continue
+    if name == 'bandit':
+        seq = extract_severities_from_bandit(p)
+    elif name == 'semgrep':
+        seq = extract_severities_from_semgrep(p)
+    else:
+        seq = extract_severities_from_pip_audit(p)
+    for s in seq:
+        s_up = (s or '').upper()
+        if any(x in s_up for x in ('CRIT', 'CRITICAL', 'ERROR')):
+            counts['critical'] += 1
+        elif 'HIGH' in s_up:
+            counts['high'] += 1
+        elif any(x in s_up for x in ('MEDIUM', 'WARNING', 'WARN')):
+            counts['medium'] += 1
+        elif s_up:
+            counts['low'] += 1
+
+print('Security scan summary:', counts)
+# Fail immediately if any critical/high findings (immediate remediation required)
+if counts['critical'] > 0 or counts['high'] > 0:
+    print('Failing pipeline due to critical/high security findings. Developers must triage immediately.')
+    sys.exit(2)
+# For medium/low, do not fail CI but surface findings so teams can schedule remediation
+print('No critical/high findings. Medium/Low must be scheduled for remediation per policy.')
+PY
+
+      - name: Upload security scan artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: security-scan-results
+          path: |
+            bandit_results.json
+            semgrep_results.json
+            pip_audit_results.json
+"""
+    return workflow
+
+
+def compose_gitlab_ci_plan() -> str:
+    """
+    Provide a GitLab CI stage plan as a string. This is a recommended template,
+    not applied by this script.
+
+    Returns:
+        A YAML string with stages and jobs for gitlab-ci, including security scans.
+    """
+    plan = """stages:
+  - lint
+  - typecheck
+  - complexity
+  - test
+  - security
+
+lint:
+  stage: lint
+  image: python:3.11
+  script:
+    - pip install ruff black
+    - ruff check .
+    - black --check .
+
+typecheck:
+  stage: typecheck
+  image: python:3.11
+  script:
+    - pip install mypy
+    - mypy .
+
+complexity:
+  stage: complexity
+  image: python:3.11
+  script:
+    - pip install radon lizard
+    - python - <<'PY'
+# Same script as in GitHub Actions to enforce thresholds
+PY
+
+test:
+  stage: test
+  image: python:3.11
+  script:
+    - pip install pytest
+    - pytest -q
+
+security:
+  stage: security
+  image: python:3.11
+  script:
+    - pip install semgrep bandit pip-audit
+    - bandit -r -f json -o bandit_results.json || true
+    - semgrep --config auto --json --output semgrep_results.json || true
+    - pip-audit --format=json --output pip_audit_results.json || true
+    - python - <<'PY'
+import json, sys, pathlib
+
+def extract_severities_from_bandit(path):
+    try:
+        data = json.loads(path.read_text(encoding='utf8'))
+        for r in data.get('results', []):
+            sev = r.get('issue_severity') or r.get('severity') or ''
+            yield str(sev)
+    except Exception:
+        return
+
+def extract_severities_from_semgrep(path):
+    try:
+        data = json.loads(path.read_text(encoding='utf8'))
+        for r in data.get('results', []):
+            sev = ''
+            extra = r.get('extra', {}) or {}
+            if isinstance(extra, dict):
+                sev = extra.get('severity') or extra.get('severity_name') or ''
+            if not sev:
+                sev = r.get('severity') or r.get('check_id') or ''
+            yield str(sev)
+    except Exception:
+        return
+
+def extract_severities_from_pip_audit(path):
+    try:
+        data = json.loads(path.read_text(encoding='utf8'))
+        items = []
+        if isinstance(data, dict):
+            items = data.get('vulns') or data.get('vulnerabilities') or []
+        elif isinstance(data, list):
+            items = data
+        for v in items:
+            sev = v.get('vuln', {}).get('severity') if isinstance(v, dict) else ''
+            if not sev:
+                sev = v.get('severity') or ''
+            yield str(sev)
+    except Exception:
+        return
+
+paths = {
+    'bandit': pathlib.Path('bandit_results.json'),
+    'semgrep': pathlib.Path('semgrep_results.json'),
+    'pip_audit': pathlib.Path('pip_audit_results.json'),
+}
+counts = {'critical':0, 'high':0, 'medium':0, 'low':0}
+for name, p in paths.items():
+    if not p.exists():
+        continue
+    if name == 'bandit':
+        seq = extract_severities_from_bandit(p)
+    elif name == 'semgrep':
+        seq = extract_severities_from_semgrep(p)
+    else:
+        seq = extract_severities_from_pip_audit(p)
+    for s in seq:
+        s_up = (s or '').upper()
+        if any(x in s_up for x in ('CRIT', 'CRITICAL', 'ERROR')):
+            counts['critical'] += 1
+        elif 'HIGH' in s_up:
+            counts['high'] += 1
+        elif any(x in s_up for x in ('MEDIUM', 'WARNING', 'WARN')):
+            counts['medium'] += 1
+        elif s_up:
+            counts['low'] += 1
+
+print('Security scan summary:', counts)
+if counts['critical'] > 0 or counts['high'] > 0:
+    print('Failing pipeline due to critical/high security findings.')
+    sys.exit(2)
+print('No critical/high findings. Medium/Low findings should be scheduled for remediation per policy.')
+PY
+  artifacts:
+    paths:
+      - bandit_results.json
+      - semgrep_results.json
+      - pip_audit_results.json
+    expire_in: 1 week
+"""
+    return plan
+
+
+def recommended_quality_script() -> str:
+    """
+    Generate a local helper script (bash) content that teams can run locally
+    to run the same checks as CI. This script is informational and not executed
+    by this planner.
+
+    Returns:
+        A string containing a bash script.
+    """
+    script = """#!/usr/bin/env bash
+set -euo pipefail
+echo "Installing dev tools..."
+python -m pip install --upgrade pip
+pip install ruff black mypy radon lizard pytest semgrep bandit pip-audit
+
+echo "Running ruff..."
+ruff check .
+
+echo "Running black check..."
+black --check .
+
+echo "Running mypy..."
+mypy .
+
+echo "Running radon/lizard complexity checks..."
+python - <<'PY'
+import sys
+from radon.metrics import mi_visit
+from radon.complexity import cc_visit
+import pathlib
+threshold_mi = 70.0
+threshold_cc = 15
+failed = []
+for path in pathlib.Path('.').rglob('*.py'):
+    try:
+        src = path.read_text(encoding='utf8')
+        mi = mi_visit(src, True)
+        if mi < threshold_mi:
+            failed.append(f\"MI_FAIL: {path} -> {mi:.1f}\")
+        blocks = cc_visit(src)
+        for block in blocks:
+            if getattr(block, 'complexity', 0) > threshold_cc:
+                failed.append(f\"CC_FAIL: {path}:{block.lineno} {block.name} -> {block.complexity}\")
+    except Exception as e:
+        print(f\"Skipping {path}: {e}\")
+if failed:
+    print(\"Complexity/Maintainability checks failed:\\n\" + \"\\n\".join(failed))
+    sys.exit(2)
+print(\"Checks passed.\")
+PY
+
+echo "Running tests..."
+pytest -q
+
+echo "Running local security scans (bandit, semgrep, pip-audit)..."
+bandit -r -f json -o bandit_results.json || true
+semgrep --config auto --json --output semgrep_results.json || true
+pip-audit --format=json --output pip_audit_results.json || true
+
+echo "Aggregating security scan results and enforcing policy locally..."
+python - <<'PY'
+import json, pathlib, sys
+
+def extract(seq):
+    for s in seq:
+        yield str(s)
+
+def extract_from_bandit(p):
+    try:
+        data = json.loads(p.read_text(encoding='utf8'))
+        for r in data.get('results', []):
+            yield r.get('issue_severity') or r.get('severity') or ''
+    except Exception:
+        return
+
+def extract_from_semgrep(p):
+    try:
+        data = json.loads(p.read_text(encoding='utf8'))
+        for r in data.get('results', []):
+            extra = r.get('extra', {}) or {}
+            sev = extra.get('severity') or extra.get('severity_name') or r.get('severity') or ''
+            yield sev
+    except Exception:
+        return
+
+def extract_from_pip_audit(p):
+    try:
+        data = json.loads(p.read_text(encoding='utf8'))
+        items = []
+        if isinstance(data, dict):
+            items = data.get('vulns') or data.get('vulnerabilities') or []
+        elif isinstance(data, list):
+            items = data
+        for v in items:
+            sev = v.get('vuln', {}).get('severity') if isinstance(v, dict) else ''
+            if not sev:
+                sev = v.get('severity') or ''
+            yield sev
+    except Exception:
+        return
+
+paths = {
+    'bandit': pathlib.Path('bandit_results.json'),
+    'semgrep': pathlib.Path('semgrep_results.json'),
+    'pip_audit': pathlib.Path('pip_audit_results.json'),
+}
+counts = {'critical':0,'high':0,'medium':0,'low':0}
+for name,p in paths.items():
+    if not p.exists():
+        continue
+    if name == 'bandit':
+        seq = extract_from_bandit(p)
+    elif name == 'semgrep':
+        seq = extract_from_semgrep(p)
+    else:
+        seq = extract_from_pip_audit(p)
+    for s in seq:
+        s_up = (s or '').upper()
+        if any(x in s_up for x in ('CRIT', 'CRITICAL', 'ERROR')):
+            counts['critical'] += 1
+        elif 'HIGH' in s_up:
+            counts['high'] += 1
+        elif any(x in s_up for x in ('MEDIUM', 'WARNING', 'WARN')):
+            counts['medium'] += 1
+        elif s_up:
+            counts['low'] += 1
+
+print('Security scan summary:', counts)
+if counts['critical'] or counts['high']:
+    print('Critical/high findings detected. Please triage immediately.')
+    sys.exit(2)
+print('No critical/high findings. Medium/Low findings should be scheduled for remediation.')
+PY
+
+echo "Local security scan artifacts saved: bandit_results.json, semgrep_results.json, pip_audit_results.json"
+"""
+    return script
+
+
+def generate_pr_template() -> str:
+    """
+    Generate a recommended PR template that requires documentation and tests
+    for public API changes. This should be added as .github/PULL_REQUEST_TEMPLATE.md by maintainers.
+
+    Returns:
+        Template string for PRs.
+    """
+    template = """## Summary
+
+<!-- Describe the change and why it is needed. Link to any related issues. -->
+
+## Checklist
+
+- [ ] The PR title and description clearly explain the intent.
+- [ ] Public APIs include docstrings (Google/NumPy/PEP-257 style).
+- [ ] New or changed public behavior includes unit tests.
+- [ ] Security-sensitive changes include unit/integration tests exercising critical code paths and threat scenarios.
+- [ ] All existing tests pass locally.
+- [ ] I have run the maintainability & complexity checks locally.
+- [ ] I have run local security scans (bandit, semgrep, pip-audit) and addressed any critical/high findings.
+
+## Security impact
+
+- Does this change touch authentication, authorization, input validation, serialization, or secrets handling? If yes, explain.
+- List any new dependencies and their risk/justification.
+
+## Type of change
+
+- Bug fix
+- Feature
+- Refactor
+- CI/doc update
+
+## How to test
+
+<!-- Instructions for validating this change -->
+"""
+    return template
+
+
+def summarize_plan() -> Dict[str, object]:
+    """
+    Produce a structured plan summary for CI updates and tests.
+
+    Returns:
+        A dictionary with actionable plan items and artifacts (workflow snippets, templates).
+    """
+    return {
+        "summary": "Plan to enable automated linting, type checking, maintainability gating, security scanning (SAST/SCA), and PR standards. "
+        "This is a planning artifact; no repository files are modified by this script.",
+        "actions": [
+            "Add CI workflow (GitHub Actions or GitLab) that runs linting, black check, mypy, complexity gates, tests, and security scans (semgrep, bandit, pip-audit).",
+            "Fail pipelines immediately on Critical/High security findings; surface Medium/Low findings and schedule remediation cadence (e.g., weekly review).",
+            "Schedule weekly full semgrep scans and/or nightly dependency scans for broader coverage; run fast semgrep on PRs for immediate feedback.",
+            "Add security-focused unit/integration tests covering authentication, input validation, and other critical code paths. Mark tests with 'security' or 'integration' markers.",
+            "Enforce maintainability index >= 70 and cognitive/cyclomatic complexity <= 15 per function/class.",
+            "Add a local quality-check helper script for developers to run the same gates locally, including security scans.",
+            "Introduce a PR template requiring docstrings, tests, and security impact justification for sensitive changes.",
+            "Ensure requirements-dev.txt (or pyproject.toml) lists dev tools: ruff, black, mypy, radon, lizard, pytest, semgrep, bandit, pip-audit.",
+            "Add pre-commit hooks to run ruff/black to reduce CI noise and speed up iteration.",
+            "Implement an immediate remediation workflow for Critical/High findings: create blocking PR, notify on-call, and track remediation in ticketing; schedule medium/low findings for regular triage cadence.",
+        ],
+        "artifacts": {
+            "github_actions_workflow": compose_github_actions_workflow(),
+            "gitlab_ci_plan": compose_gitlab_ci_plan(),
+            "local_quality_script": recommended_quality_script(),
+            "pr_template": generate_pr_template(),
+        },
+        "notes": [
+            "Do not modify existing configuration files in this planning step. Create a branch and PR with these changes.",
+            "Thresholds (MI >= 70, CC <= 15) are conservative defaults. Teams may adjust thresholds per codebase context.",
+            "Complexity tools: radon (maintainability index) and lizard or radon for complexity metrics. Radon provides MI and CC.",
+            "Enforce tests for public API changes by including a checklist in PR template and a CI job running pytest.",
+            "Automate formatting via pre-commit to reduce friction: add .pre-commit-config.yaml with black/ruff hooks.",
+            "Security policy: pipelines are configured to fail on Critical/High findings to force immediate remediation. Medium/Low findings are reported and should be scheduled into backlog with a regular cadence (e.g., weekly security triage).",
+            "Integrate Semgrep App or similar for centralized triage and commenting on PRs when possible. Consider integrating SCA dashboards for continuous monitoring.",
+        ],
+    }
+
+
+def format_plan_as_json(plan: Dict[str, object]) -> str:
+    """
+    Serialize the plan to a pretty JSON string for automation or review.
+
+    Args:
+        plan: The plan dictionary.
+
+    Returns:
+        Pretty-printed JSON string.
+    """
+    return json.dumps(plan, indent=2, sort_keys=False)
+
+
+def main(repo_path: str = ".") -> int:
+    """
+    Entry point for producing the CI and testing plan.
+
+    The function prints:
+    - Detected existing config files
+    - A high-level summary of recommended actions
+    - The GitHub Actions workflow YAML (as a plan)
+    - The PR template to require docstrings and tests
+
+    Returns:
+        Exit code: 0 on success.
+    """
+    configs = detect_existing_configs(repo_path)
+    plan = summarize_plan()
+
+    print("Repository config detection:")
+    for cfg, present in configs.items():
+        print(f"  {cfg}: {'FOUND' if present else 'MISSING'}")
+    print("\nHigh-level recommended actions:")
+    for idx, action in enumerate(plan["actions"], start=1):
+        print(f"  {idx}. {action}")
+
+    print("\nNotes:")
+    for note in plan["notes"]:
+        print(f"  - {note}")
+
+    print("\n--- BEGIN: Recommended GitHub Actions workflow (plan) ---\n")
+    print(plan["artifacts"]["github_actions_workflow"])
+    print("\n--- END: Recommended GitHub Actions workflow (plan) ---\n")
+
+    print("--- BEGIN: Recommended local quality script (plan) ---\n")
+    print(plan["artifacts"]["local_quality_script"])
+    print("\n--- END: Recommended local quality script (plan) ---\n")
+
+    print("--- BEGIN: Recommended PR template (plan) ---\n")
+    print(plan["artifacts"]["pr_template"])
+    print("\n--- END: Recommended PR template (plan) ---\n")
+
+    # For programmatic consumption, also dump the full plan as JSON to a file if desired.
+    # We avoid writing files automatically; instead, print the JSON summary location hint.
+    print("Full plan JSON available via function 'format_plan_as_json(summarize_plan())' in this module.")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

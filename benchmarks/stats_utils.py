@@ -5,17 +5,28 @@ from scipy import stats
 from typing import List, Tuple, Dict, Any
 from .utils import get_python_files
 
+def _count_nonblank_lines_in_file(file_path: str) -> int:
+    """
+    Count non-blank lines in a file using a generator expression to avoid
+    building a large list in memory.
+
+    Returns:
+        int: Number of non-empty lines in the file. Returns 0 if the file
+             cannot be read due to encoding or I/O errors.
+    """
+    try:
+        with open(file_path, 'r', encoding='utf-8') as f:
+            return sum(1 for line in f if line.strip())
+    except (UnicodeDecodeError, IOError):
+        return 0
+
 def get_codebase_size_bucket(codebase_path: str) -> str:
     """Categorize codebase by total lines of code."""
     python_files = get_python_files(codebase_path)
     total_loc = 0
     
     for file_path in python_files:
-        try:
-            with open(file_path, 'r', encoding='utf-8') as f:
-                total_loc += len([line for line in f if line.strip()])
-        except (UnicodeDecodeError, IOError):
-            continue
+        total_loc += _count_nonblank_lines_in_file(file_path)
     
     if total_loc < 100:
         return "small"
@@ -107,7 +118,7 @@ class BenchmarkResult:
     
     def __iter__(self):
         """Maintain backward compatibility with tuple unpacking."""
-        return iter([self.score, self.details])
+        return iter((self.score, self.details))
     
     def format_score_with_ci(self) -> str:
         """Format score with confidence interval."""
@@ -115,4 +126,4 @@ class BenchmarkResult:
             return f"{self.score:.2f}"
         
         ci_range = self.confidence_interval[1] - self.confidence_interval[0]
-        return f"{self.score:.2f} ±{ci_range/2:.1f}" 
+        return f"{self.score:.2f} ±{ci_range/2:.1f}"

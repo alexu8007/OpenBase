@@ -14,6 +14,8 @@ from collections import defaultdict
 import os
 import time
 from datetime import datetime
+import logging
+from typing import Callable, Dict, Any, List, Tuple, Set, Optional
 
 from dotenv import load_dotenv
 
@@ -51,9 +53,39 @@ BUILT_IN_MODULES = [
 app = typer.Typer(context_settings={"help_option_names": ["-h", "--help"]})
 console = Console()
 
+# Logger setup for structured logging of sensitive operations
+logger = logging.getLogger(__name__)
+if not logger.handlers:
+    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s %(message)s")
+
+
+def _safe_filename(name: str) -> str:
+    """Return a filesystem-safe filename derived from name."""
+    base = os.path.basename(name)
+    # Allow alphanumeric, dash, underscore, dot
+    sanitized = "".join(ch for ch in base if ch.isalnum() or ch in ("-", "_", "." ))
+    if not sanitized:
+        sanitized = "file"
+    return sanitized[:255]
+
+
+def _to_display(name: str) -> str:
+    """Convert various benchmark identifiers to the internal display name.
+
+    Examples:
+      'git_health' -> 'GitHealth'
+      'GitHealth' -> 'Githealth' (preserve capitalization as best effort)
+    """
+    return name.replace('_', ' ').title().replace(' ', '')
+
+
+# Dependency-injectable hook for improving code via LLMs (testable boundary)
+PERFECT_CODE_FUNC: Callable[..., str] = perfect_code_with_model
+
+
 # Dynamically collect benchmarks
-def _load_benchmarks():
-    mapping = {}
+def _load_benchmarks() -> Dict[str, Callable[..., Any]]:
+    mapping: Dict[str, Callable[..., Any]] = {}
     for mod in BUILT_IN_MODULES:
         raw_name = mod.__name__.split(".")[-1]
         display_name = raw_name.replace("_", " ").title().replace(" ", "")  # e.g., git_health -> GitHealth
@@ -69,7 +101,7 @@ def _load_benchmarks():
 BENCHMARK_FUNCS = _load_benchmarks()
 
 # Map of benchmark name -> supported languages set (lowercase)
-BENCHMARK_LANGS = {}
+BENCHMARK_LANGS: Dict[str, Set[str]] = {}
 for mod in BUILT_IN_MODULES:
     raw_name = mod.__name__.split(".")[-1]
     display_name = raw_name.replace("_", " ").title().replace(" ", "")
@@ -78,11 +110,12 @@ for mod in BUILT_IN_MODULES:
         langs = {"any"}
     BENCHMARK_LANGS[display_name] = {lang.lower() for lang in langs}
 
-def _analyze_single_codebase(path: Path, skip_set, benchmark_weights):
+
+def _analyze_single_codebase(path: Path, skip_set: Set[str], benchmark_weights: Dict[str, float]) -> Dict[str, float]:
     """Run benchmarks on a single codebase directory and return raw score dict."""
     from benchmarks.language_utils import detect_languages
     langs = detect_languages(path)
-    raw_scores = {}
+    raw_scores: Dict[str, float] = {}
 
     for name, func in BENCHMARK_FUNCS.items():
         if name in skip_set:
@@ -114,11 +147,26 @@ def _copy_tests_for_file(src_file: Path, dest_dir: Path) -> None:
         parent = src_file.parent
         # Copy sibling tests
         for cand in parent.glob("test_*.py"):
-            content = cand.read_text()
-            (tests_dir / cand.name).write_text(content)
+            try:
+                content = cand.read_text()
+            except (OSError, UnicodeDecodeError) as e:
+                logger.warning("Failed to read test file %s: %s", cand, e, exc_info=True)
+                continue
+            try:
+                (tests_dir / cand.name).write_text(content)
+            except (OSError, PermissionError) as e:
+                logger.warning("Failed to write test file %s to %s: %s", cand.name, tests_dir, e, exc_info=True)
+
         for cand in parent.glob("*_test.py"):
-            content = cand.read_text()
-            (tests_dir / cand.name).write_text(content)
+            try:
+                content = cand.read_text()
+            except (OSError, UnicodeDecodeError) as e:
+                logger.warning("Failed to read test file %s: %s", cand, e, exc_info=True)
+                continue
+            try:
+                (tests_dir / cand.name).write_text(content)
+            except (OSError, PermissionError) as e:
+                logger.warning("Failed to write test file %s to %s: %s", cand.name, tests_dir, e, exc_info=True)
 
         # If there's an immediate `tests` folder next to the file, copy its simple tests
         neighbor_tests = parent / "tests"
@@ -128,12 +176,44 @@ def _copy_tests_for_file(src_file: Path, dest_dir: Path) -> None:
                 out_path = tests_dir / rel
                 out_path.parent.mkdir(parents=True, exist_ok=True)
                 try:
-                    out_path.write_text(cand.read_text())
-                except Exception:
-                    pass
-    except Exception:
+                    content = cand.read_text()
+                except (OSError, UnicodeDecodeError) as e:
+                    logger.warning("Failed to read neighbor test %s: %s", cand, e, exc_info=True)
+                    continue
+                try:
+                    out_path.write_text(content)
+                except (OSError, PermissionError) as e:
+                    logger.warning("Failed to write neighbor test %s to %s: %s", cand, out_path, e, exc_info=True)
+    except (OSError, PermissionError) as e:
         # Non-fatal: absence of tests is acceptable; testability benchmark will be skipped by default
-        pass
+        logger.warning("Failed while copying tests for %s into %s: %s", src_file, dest_dir, e, exc_info=True)
+
+
+def _read_json_file(path: Path) -> Dict[str, Any]:
+    """Read and parse a JSON file, returning an empty dict on failure."""
+    try:
+        raw_text = path.read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError) as e:
+        logger.exception("Failed to read config file %s", path)
+        raise
+    try:
+        return json.loads(raw_text)
+    except json.JSONDecodeError:
+        logger.exception("Invalid JSON in %s", path)
+        raise
+
+
+def _collect_folder_avg(folder: Path, skip_set: Set[str], benchmark_weights: Dict[str, float]) -> Tuple[Dict[str, float], int]:
+    """Collect average benchmark scores across immediate subdirectories of folder."""
+    repo_dirs = [d for d in folder.iterdir() if d.is_dir() and not d.name.startswith('.')]
+    aggregate: defaultdict[str, list] = defaultdict(list)
+    for repo in repo_dirs:
+        raw_scores = _analyze_single_codebase(repo, skip_set, benchmark_weights)
+        for k, v in raw_scores.items():
+            aggregate[k].append(v)
+    avg_scores = {k: (sum(vs)/len(vs) if vs else 0.0) for k, vs in aggregate.items()}
+    return avg_scores, len(repo_dirs)
+
 
 @app.command()
 def compare_collections(
@@ -141,35 +221,20 @@ def compare_collections(
     folder2: Path = typer.Option(..., "--folder2", help="Directory containing multiple repos (collection 2)"),
     skip: str = typer.Option('', "--skip", help="Comma-separated list of benchmark names to skip."),
     weights: str = typer.Option('{}', "--weights", help='JSON string to weight benchmarks.'),
-):
-    """Compare two *collections* of repositories (every immediate subdirectory is treated as a repo)."""
+) -> None:
+    """Compare two collections of repositories (each immediate subdirectory is treated as a repo)."""
     if not folder1.is_dir() or not folder2.is_dir():
         console.print("[bold red]Error: Both folders must be valid directories.[/bold red]")
         raise typer.Exit(code=1)
 
     try:
-        benchmark_weights = json.loads(weights)
+        benchmark_weights: Dict[str, float] = json.loads(weights)
     except json.JSONDecodeError:
         console.print("[bold red]Error: Invalid JSON format for weights.[/bold red]")
         raise typer.Exit(code=1)
 
     # Normalize skip tokens to internal benchmark display names (e.g., git_health -> GitHealth)
-    def _to_display(name: str) -> str:
-        return name.replace('_', ' ').title().replace(' ', '')
-    skip_set = {_to_display(s.strip()) for s in skip.split(',') if s.strip()}
-
-    def _collect(folder, progress, task_id):
-        repo_dirs = [d for d in folder.iterdir() if d.is_dir() and not d.name.startswith('.')]
-        aggregate: defaultdict[str, list] = defaultdict(list)
-        for repo in repo_dirs:
-            # Update progress bar description
-            progress.update(task_id, description=f"{folder.name}/{repo.name}")
-            raw_scores = _analyze_single_codebase(repo, skip_set, benchmark_weights)
-            for k, v in raw_scores.items():
-                aggregate[k].append(v)
-            progress.advance(task_id)
-        avg_scores = {k: (sum(vs)/len(vs) if vs else 0.0) for k, vs in aggregate.items()}
-        return avg_scores, len(repo_dirs)
+    skip_set: Set[str] = {_to_display(s.strip()) for s in skip.split(',') if s.strip()}
 
     from rich.progress import Progress, SpinnerColumn, TextColumn, BarColumn, TimeElapsedColumn
     total_repos = sum(1 for _ in folder1.iterdir() if _.is_dir() and not _.name.startswith('.')) + sum(1 for _ in folder2.iterdir() if _.is_dir() and not _.name.startswith('.'))
@@ -183,6 +248,20 @@ def compare_collections(
         transient=True
     ) as progress:
         task_id = progress.add_task("Analyzing repositories...", total=total_repos)
+        # Use helper to collect averages while updating progress description
+        def _collect(folder: Path, progress_obj: Progress, task_identifier: int):
+            repo_dirs = [d for d in folder.iterdir() if d.is_dir() and not d.name.startswith('.')]
+            aggregate: defaultdict[str, list] = defaultdict(list)
+            for repo in repo_dirs:
+                # Update progress bar description
+                progress_obj.update(task_identifier, description=f"{folder.name}/{repo.name}")
+                raw_scores = _analyze_single_codebase(repo, skip_set, benchmark_weights)
+                for k, v in raw_scores.items():
+                    aggregate[k].append(v)
+                progress_obj.advance(task_identifier)
+            avg_scores = {k: (sum(vs)/len(vs) if vs else 0.0) for k, vs in aggregate.items()}
+            return avg_scores, len(repo_dirs)
+
         avg1, n1 = _collect(folder1, progress, task_id)
         avg2, n2 = _collect(folder2, progress, task_id)
 
@@ -216,8 +295,13 @@ def compare_collections(
 @app.command()
 def llm_battle(
     config: Path = typer.Option(Path("openbase.config.json"), "--config", help="Path to openbase.config.json"),
-):
-    """Run LLM battle using configuration and files from benchmark folder (no flags needed)."""
+) -> None:
+    """Run LLM battle using configuration and files from benchmark folder (no flags needed).
+
+    This command reads openbase.config.json to determine models, benchmark folder, output directory,
+    and other optional configuration. The LLM improvement function is injected via PERFECT_CODE_FUNC
+    for easier testing.
+    """
     load_dotenv()
 
     repo_root = Path(__file__).resolve().parent
@@ -233,9 +317,9 @@ def llm_battle(
         raise typer.Exit(code=1)
 
     try:
-        cfg = json.loads(config_path.read_text())
-    except json.JSONDecodeError:
-        console.print("[bold red]Invalid JSON in openbase.config.json[/bold red]")
+        cfg = _read_json_file(config_path)
+    except Exception:
+        console.print("[bold red]Invalid or unreadable openbase.config.json[/bold red]")
         raise typer.Exit(code=1)
 
     models_val = cfg.get("models") or cfg.get("model")
@@ -268,14 +352,17 @@ def llm_battle(
         out_dir.mkdir(parents=True, exist_ok=True)
     except (PermissionError, OSError) as e:
         out_dir = repo_root / "runs"
-        out_dir.mkdir(parents=True, exist_ok=True)
+        try:
+            out_dir.mkdir(parents=True, exist_ok=True)
+        except (PermissionError, OSError) as e2:
+            logger.exception("Unable to create fallback run directory %s", out_dir)
+            console.print(f"[red]Could not create output directories ({e2}). Exiting.[/red]")
+            raise typer.Exit(code=1)
         console.print(f"[yellow]Could not write to {configured_out} ({e}). Falling back to {out_dir}[/yellow]")
 
     # Skip and weights
     skip = str(cfg.get("skip", "GitHealth,Testability"))
-    def _to_display(name: str) -> str:
-        return name.replace('_', ' ').title().replace(' ', '')
-    skip_set = {_to_display(s.strip()) for s in skip.split(',') if s.strip()}
+    skip_set: Set[str] = {_to_display(s.strip()) for s in skip.split(',') if s.strip()}
 
     weights_val = cfg.get("weights", {})
     if isinstance(weights_val, str):
@@ -289,18 +376,21 @@ def llm_battle(
         benchmark_weights = {}
 
     extra_instructions_path = cfg.get("extra_instructions")
-    extra_text = None
+    extra_text: Optional[str] = None
     if extra_instructions_path:
         p = Path(extra_instructions_path)
         if p.exists():
-            extra_text = p.read_text(encoding="utf-8")
+            try:
+                extra_text = p.read_text(encoding="utf-8")
+            except (OSError, UnicodeDecodeError) as e:
+                logger.warning("Could not read extra_instructions file %s: %s", p, e, exc_info=True)
 
     copy_tests = bool(cfg.get("copy_tests", True))
 
     # Prepare run directories
     run_id = datetime.utcnow().strftime("%Y%m%d_%H%M%S")
     run_root = out_dir / "llm_battle" / run_id
-    model_dirs = {}
+    model_dirs: Dict[str, Path] = {}
     for model in model_ids:
         mslug = _slugify(model)
         model_dir = run_root / mslug
@@ -323,7 +413,8 @@ def llm_battle(
         for file_path in file_paths:
             try:
                 original_code = file_path.read_text(encoding="utf-8", errors="ignore")
-            except Exception:
+            except (OSError, UnicodeDecodeError) as e:
+                logger.warning("Failed to read source file %s: %s", file_path, e, exc_info=True)
                 original_code = ""
             file_stem = file_path.stem
             for model in model_ids:
@@ -331,7 +422,7 @@ def llm_battle(
                 out_repo.mkdir(parents=True, exist_ok=True)
 
                 try:
-                    new_code = perfect_code_with_model(
+                    new_code = PERFECT_CODE_FUNC(
                         model=model,
                         code=original_code,
                         file_name=file_path.name,
@@ -339,16 +430,23 @@ def llm_battle(
                         extra_instructions=extra_text,
                     )
                 except Exception as e:
-                    console.print(f"[yellow]Model '{model}' failed on {file_path.name}: {e}[/yellow]")
+                    logger.exception("Model '%s' failed on %s", model, file_path.name)
+                    console.print(f"[yellow]Model '{model}' failed on {file_path.name}. See logs for details.[/yellow]")
                     new_code = original_code
 
                 # Write improved file (flatten nested names if needed)
                 out_file = out_repo / file_path.name
                 try:
                     out_file.write_text(new_code, encoding="utf-8")
-                except Exception:
-                    out_file = out_repo / file_path.name.replace(os.sep, "_")
-                    out_file.write_text(new_code, encoding="utf-8")
+                except (OSError, PermissionError) as e:
+                    logger.warning("Failed to write file %s: %s. Attempting safe filename fallback.", out_file, e, exc_info=True)
+                    safe_name = _safe_filename(file_path.name)
+                    out_file = out_repo / safe_name
+                    try:
+                        out_file.write_text(new_code, encoding="utf-8")
+                    except (OSError, PermissionError) as e2:
+                        logger.exception("Failed to write fallback file %s: %s", out_file, e2)
+                        console.print(f"[red]Failed to write output file for {file_path.name} (model {model}).[/red]")
 
                 # Best-effort tests copy for python files
                 if copy_tests and file_path.suffix == ".py":
@@ -410,8 +508,13 @@ def llm_battle(
         "weights": benchmark_weights,
         "files": [str(p) for p in file_paths],
     }
-    export_path.write_text(json.dumps(summary, indent=2))
-    console.print(f"[green]Saved run to {export_path.parent}")
+    try:
+        export_path.write_text(json.dumps(summary, indent=2))
+        console.print(f"[green]Saved run to {export_path.parent}")
+    except (OSError, PermissionError) as e:
+        logger.exception("Failed to write summary.json to %s", export_path)
+        console.print(f"[red]Failed to save run summary to {export_path}[/red]")
+
 
 def compare(
     codebase1: Path = typer.Option(..., "--codebase1", "-c1", help="Path to the first codebase."),
@@ -421,7 +524,7 @@ def compare(
     skip: str = typer.Option('', "--skip", help="Comma-separated list of benchmark names to skip."),
     export: Path = typer.Option(None, "--export", help="Path to write JSON export of results."),
     profile: Path = typer.Option(None, "--profile", help="Python script to execute for runtime profiling (pyinstrument)"),
-):
+) -> None:
     """
     Compares two codebases and rates them on a scale based on different benchmarks.
     """
@@ -435,7 +538,8 @@ def compare(
         console.print("[bold red]Error: Invalid JSON format for weights.[/bold red]")
         raise typer.Exit(code=1)
 
-    skip_set = {s.strip().capitalize() for s in skip.split(',') if s.strip()}
+    # Normalize skip tokens using standardized display conversion
+    skip_set: Set[str] = {_to_display(s.strip()) for s in skip.split(',') if s.strip()}
 
     # Set env for runtime profiling
     if profile:
@@ -456,7 +560,7 @@ def compare(
     langs2 = detect_languages(codebase2)
 
     # Prepare benchmarks to run, filtering by language support
-    benchmarks_to_run = []
+    benchmarks_to_run: List[Tuple[str, Callable[..., Any]]] = []
     for name, func in BENCHMARK_FUNCS.items():
         if name in skip_set:
             continue
@@ -464,11 +568,28 @@ def compare(
         if "any" in supported or (langs1 & supported) or (langs2 & supported):
             benchmarks_to_run.append((name, func))
 
-    raw_scores1, raw_scores2 = {}, {}
-    details1, details2 = {}, {}
-    raw_metrics1, raw_metrics2 = {}, {}
+    raw_scores1: Dict[str, float] = {}
+    raw_scores2: Dict[str, float] = {}
+    details1: Dict[str, Any] = {}
+    details2: Dict[str, Any] = {}
+    raw_metrics1: Dict[str, Any] = {}
+    raw_metrics2: Dict[str, Any] = {}
     # Store full result objects so we don't need to re-run benchmarks later
-    result_objects1, result_objects2 = {}, {}
+    result_objects1: Dict[str, Any] = {}
+    result_objects2: Dict[str, Any] = {}
+
+    def _unpack_result(result: Any) -> Tuple[float, Any, Dict[str, Any]]:
+        """Normalize benchmark result into (score, details, raw_metrics)."""
+        if isinstance(result, BenchmarkResult):
+            return result.score, result.details, getattr(result, "raw_metrics", {})
+        if isinstance(result, tuple) and len(result) >= 2:
+            # legacy format (score, details)
+            return result[0], result[1], {}
+        # fallback: single numeric value
+        try:
+            return float(result), [], {}
+        except Exception:
+            return 0.0, [], {}
 
     # Run benchmarks with progress tracking
     with Progress(
@@ -491,21 +612,12 @@ def compare(
             result1 = func(str(codebase1))
             result2 = func(str(codebase2))
             
-            # Handle both old tuple format and new BenchmarkResult
-            if isinstance(result1, BenchmarkResult):
-                score1, detail1 = result1.score, result1.details
-                raw_metrics1[name] = result1.raw_metrics
-            else:
-                score1, detail1 = result1
-                raw_metrics1[name] = {}
-                
-            if isinstance(result2, BenchmarkResult):
-                score2, detail2 = result2.score, result2.details
-                raw_metrics2[name] = result2.raw_metrics
-            else:
-                score2, detail2 = result2
-                raw_metrics2[name] = {}
-            
+            # Normalize and unpack results
+            score1, detail1, metrics1 = _unpack_result(result1)
+            score2, detail2, metrics2 = _unpack_result(result2)
+            raw_metrics1[name] = metrics1
+            raw_metrics2[name] = metrics2
+
             # cache result objects
             result_objects1[name] = result1
             result_objects2[name] = result2
@@ -522,9 +634,9 @@ def compare(
     console.print("✅ Analysis complete!\n")
     
     # Check for empty repositories
-    if all(score == 0.0 for score in raw_scores1.values()):
+    if raw_scores1 and all(score == 0.0 for score in raw_scores1.values()):
         console.print(f"[yellow]Warning: {codebase1.name} appears to be empty or has no analyzable code.[/yellow]")
-    if all(score == 0.0 for score in raw_scores2.values()):
+    if raw_scores2 and all(score == 0.0 for score in raw_scores2.values()):
         console.print(f"[yellow]Warning: {codebase2.name} appears to be empty or has no analyzable code.[/yellow]")
     
     # Apply z-score normalization to prevent metric dominance
@@ -544,22 +656,20 @@ def compare(
     table.add_column("Winner", justify="center", style="bold yellow")
     
     # Apply weights and calculate totals
-    total_score1, total_score2 = 0, 0
-    for name in benchmarks_to_run:
-        name = name[0]  # Extract name string from tuple
-        func = BENCHMARK_FUNCS[name]
-            
+    total_score1, total_score2 = 0.0, 0.0
+    for name, _ in benchmarks_to_run:
+        # Extract name string from tuple in benchmarks_to_run loop
         weight = benchmark_weights.get(name, 1.0)
-        weighted_score1 = normalized_scores1[name] * weight
-        weighted_score2 = normalized_scores2[name] * weight
+        weighted_score1 = normalized_scores1.get(name, 0.0) * weight
+        weighted_score2 = normalized_scores2.get(name, 0.0) * weight
         
         # Accumulate total scores
         total_score1 += weighted_score1
         total_score2 += weighted_score2
 
         # Format scores with confidence intervals if available
-        result1 = result_objects1[name]
-        result2 = result_objects2[name]
+        result1 = result_objects1.get(name)
+        result2 = result_objects2.get(name)
         
         if isinstance(result1, BenchmarkResult):
             score1_display = result1.format_score_with_ci()
@@ -650,9 +760,13 @@ def compare(
             "total_score2": total_score2,
             **enhanced_results
         }
-        os.makedirs(export.parent, exist_ok=True)
-        export.write_text(json.dumps(export_data, indent=2))
-        console.print(f"[green]Exported results to {export}")
+        try:
+            os.makedirs(export.parent, exist_ok=True)
+            export.write_text(json.dumps(export_data, indent=2))
+            console.print(f"[green]Exported results to {export}")
+        except (OSError, PermissionError) as e:
+            logger.exception("Failed to export results to %s", export)
+            console.print(f"[red]Failed to export results to {export}[/red]")
 
     if verbose:
         console.print("\n" + "="*60)
@@ -666,16 +780,16 @@ def compare(
             tree = Tree(f"[bold]{name}[/bold]")
             
             # Add codebase 1 details
-            cb1_branch = tree.add(f"[magenta]🔵 {codebase1.name}[/magenta] - Score: [bold]{normalized_scores1[name]:.2f}[/bold]")
-            details1_content = details1[name] if details1[name] else ["✅ No issues found."]
+            cb1_branch = tree.add(f"[magenta]🔵 {codebase1.name}[/magenta] - Score: [bold]{normalized_scores1.get(name, 0.0):.2f}[/bold]")
+            details1_content = details1.get(name) if details1.get(name) else ["✅ No issues found."]
             for detail in details1_content[:5]:  # Limit to first 5 items
                 cb1_branch.add(f"• {detail}")
             if len(details1_content) > 5:
                 cb1_branch.add(f"[dim]... and {len(details1_content) - 5} more items[/dim]")
             
             # Add codebase 2 details
-            cb2_branch = tree.add(f"[green]🟢 {codebase2.name}[/green] - Score: [bold]{normalized_scores2[name]:.2f}[/bold]")
-            details2_content = details2[name] if details2[name] else ["✅ No issues found."]
+            cb2_branch = tree.add(f"[green]🟢 {codebase2.name}[/green] - Score: [bold]{normalized_scores2.get(name, 0.0):.2f}[/bold]")
+            details2_content = details2.get(name) if details2.get(name) else ["✅ No issues found."]
             for detail in details2_content[:5]:  # Limit to first 5 items
                 cb2_branch.add(f"• {detail}")
             if len(details2_content) > 5:
@@ -684,7 +798,7 @@ def compare(
             console.print(tree)
             
             # Add interpretation
-            score1, score2 = normalized_scores1[name], normalized_scores2[name]
+            score1, score2 = normalized_scores1.get(name, 0.0), normalized_scores2.get(name, 0.0)
             if abs(score1 - score2) < 0.5:
                 interpretation = "📊 Both codebases perform similarly in this area."
             elif score1 > score2:
@@ -697,4 +811,4 @@ def compare(
 
 
 if __name__ == "__main__":
-    app() 
+    app()

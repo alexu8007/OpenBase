@@ -7,12 +7,20 @@ import time
 from typing import List, Dict, Any
 from .utils import get_python_files
 from .stats_utils import BenchmarkResult, calculate_confidence_interval, adjust_score_for_size, get_codebase_size_bucket
+import tempfile
+from urllib.parse import urlparse
+import unittest
+from unittest.mock import patch
 
 def assess_security(codebase_path: str) -> BenchmarkResult:
     """
     Hybrid static + dynamic security assessment.
     Combines bandit/safety with optional OWASP ZAP dynamic scanning.
     """
+    # Basic validation of inputs (zero-trust)
+    if not isinstance(codebase_path, str) or not os.path.isdir(codebase_path):
+        raise ValueError("codebase_path must be an existing directory")
+
     details = []
     raw_metrics = {}
     
@@ -24,12 +32,16 @@ def assess_security(codebase_path: str) -> BenchmarkResult:
     # === DYNAMIC ANALYSIS ===
     web_app_url = os.getenv("BENCH_WEB_APP_URL")  # e.g., http://localhost:8000
     if web_app_url:
-        dynamic_score, dynamic_details, dynamic_metrics = _assess_dynamic_security(web_app_url)
-        details.extend(dynamic_details)
-        raw_metrics.update(dynamic_metrics)
-        
-        # Combine static + dynamic (weighted)
-        final_score = (0.6 * static_score) + (0.4 * dynamic_score)
+        try:
+            dynamic_score, dynamic_details, dynamic_metrics = _assess_dynamic_security(web_app_url)
+            details.extend(dynamic_details)
+            raw_metrics.update(dynamic_metrics)
+            
+            # Combine static + dynamic (weighted)
+            final_score = (0.6 * static_score) + (0.4 * dynamic_score)
+        except ValueError as e:
+            details.append(f"[ZAP] Invalid URL provided for dynamic scan: {str(e)}. Skipping dynamic analysis.")
+            final_score = static_score
     else:
         final_score = static_score
         details.append("No web app URL provided (set BENCH_WEB_APP_URL). Using static analysis only.")
@@ -57,6 +69,9 @@ def assess_security(codebase_path: str) -> BenchmarkResult:
 
 def _assess_static_security(codebase_path: str) -> tuple[float, List[str], Dict[str, Any]]:
     """Static security analysis with bandit and safety."""
+    if not isinstance(codebase_path, str) or not os.path.isdir(codebase_path):
+        raise ValueError("codebase_path must be an existing directory")
+
     details = []
     metrics = {}
     
@@ -160,18 +175,29 @@ def _assess_static_security(codebase_path: str) -> tuple[float, List[str], Dict[
 
 def _assess_dynamic_security(web_app_url: str) -> tuple[float, List[str], Dict[str, Any]]:
     """Dynamic security testing with OWASP ZAP (if available)."""
+    # Validate URL (whitelist scheme + non-empty netloc)
+    parsed = urlparse(web_app_url)
+    if parsed.scheme not in ("http", "https") or not parsed.netloc:
+        raise ValueError("web_app_url must be a valid http or https URL")
+
     details = []
     metrics = {}
     
     # Check if ZAP is available
+    tmp_report_path = None
     try:
+        # Create a secure temporary file for the ZAP report (avoid hard-coded /tmp)
+        tmp_file = tempfile.NamedTemporaryFile(prefix="zap_report_", suffix=".json", delete=False)
+        tmp_report_path = tmp_file.name
+        tmp_file.close()
+
         # Try ZAP baseline scan (quick passive scan)
         command = [
             "docker", "run", "--rm", "-t",
             "owasp/zap2docker-stable",
             "zap-baseline.py",
             "-t", web_app_url,
-            "-J", "/tmp/zap-report.json"
+            "-J", tmp_report_path
         ]
         
         details.append(f"[ZAP] Running baseline scan on {web_app_url}")
@@ -203,8 +229,30 @@ def _assess_dynamic_security(web_app_url: str) -> tuple[float, List[str], Dict[s
             dynamic_score = max(0.0, 10.0 - score_deduction)
             
         else:
-            details.append("[ZAP] Scan completed but could not parse results")
-            dynamic_score = 5.0
+            # If the stdout doesn't contain expected tokens, try to read the generated report
+            if tmp_report_path and os.path.exists(tmp_report_path):
+                try:
+                    with open(tmp_report_path, "r", encoding="utf-8") as f:
+                        report_text = f.read()
+                    if "PASS" in report_text or "WARN" in report_text:
+                        high_count = report_text.count("HIGH")
+                        medium_count = report_text.count("MEDIUM")
+                        low_count = report_text.count("LOW")
+                        details.append(f"[ZAP] Findings (from report) - High: {high_count}, Medium: {medium_count}, Low: {low_count}")
+                        metrics["zap_high"] = high_count
+                        metrics["zap_medium"] = medium_count
+                        metrics["zap_low"] = low_count
+                        score_deduction = (high_count * 4) + (medium_count * 2) + (low_count * 0.5)
+                        dynamic_score = max(0.0, 10.0 - score_deduction)
+                    else:
+                        details.append("[ZAP] Scan completed but could not parse results")
+                        dynamic_score = 5.0
+                except Exception:
+                    details.append("[ZAP] Scan completed but failed to read report")
+                    dynamic_score = 5.0
+            else:
+                details.append("[ZAP] Scan completed but could not parse results")
+                dynamic_score = 5.0
             
     except subprocess.TimeoutExpired:
         details.append("[ZAP] Scan timed out (>2 min)")
@@ -215,6 +263,31 @@ def _assess_dynamic_security(web_app_url: str) -> tuple[float, List[str], Dict[s
     except Exception as e:
         details.append(f"[ZAP] Error: {e}")
         dynamic_score = 3.0
+    finally:
+        # Clean up temporary report file if it was created
+        if tmp_report_path and os.path.exists(tmp_report_path):
+            try:
+                os.remove(tmp_report_path)
+            except Exception:
+                # Suppress cleanup errors to avoid masking the main result
+                pass
     
     metrics["dynamic_score"] = dynamic_score
     return dynamic_score, details, metrics 
+
+
+# Minimal tests to validate secure behavior (URL validation and subprocess handling)
+class SecurityIntegrationTests(unittest.TestCase):
+    def test_assess_dynamic_security_invalid_url(self):
+        with self.assertRaises(ValueError):
+            _assess_dynamic_security("ftp://example.com/resource")
+    
+    def test_assess_dynamic_security_docker_not_found(self):
+        # Simulate subprocess.run raising FileNotFoundError (docker not installed)
+        with patch("subprocess.run", side_effect=FileNotFoundError):
+            score, details, metrics = _assess_dynamic_security("http://example.com")
+            self.assertEqual(score, 5.0)
+            self.assertIn("Docker/ZAP not available", " ".join(details))
+
+if __name__ == "__main__":
+    unittest.main()

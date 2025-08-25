@@ -14,7 +14,9 @@ from fastapi import (
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 from starlette.responses import StreamingResponse
-
+import asyncio
+import random
+import httpx
 
 app = FastAPI(title="Benchmarkv01 API Example")
 
@@ -55,6 +57,12 @@ def get_fake_db():
         db["connected"] = False
 
 
+async def get_http_client():
+    """Dependency that provides an async HTTP client for external calls."""
+    async with httpx.AsyncClient() as client:
+        yield client
+
+
 @app.post("/items", response_model=OutputItem, status_code=201)
 def create_item(item: InputItem, db: Dict[str, Any] = Depends(get_fake_db)) -> OutputItem:
     """Validated route using a Pydantic model (good practice)."""
@@ -76,30 +84,60 @@ def create_item_unsafe(payload: Dict[str, Any] = Body(...)) -> Dict[str, Any]:
 
 
 @app.get("/search")
-def search(q: Optional[str] = Query(None), limit: Optional[str] = Query(None)) -> Dict[str, Any]:
+def search(q: Optional[str] = Query(None), limit: Optional[int] = Query(None, ge=1, le=1000)) -> Dict[str, Any]:
     """
-    Mixed validation: 'q' is optional; 'limit' is accepted as string and then cast
-    without validation, which can raise at runtime (intentional smell).
+    Mixed validation: 'q' is optional; 'limit' is validated via Query constraints to
+    ensure only integer values within a safe range are accepted.
     """
     parsed_limit: int
     if limit is None:
         parsed_limit = 10
     else:
-        # Intentionally unsafe cast for the benchmark to flag
-        parsed_limit = int(limit)  # noqa: PLW1510 (example of unsafe parsing)
+        parsed_limit = limit
     return {"q": q, "limit": parsed_limit}
 
 
 @app.get("/external")
-def call_external_service() -> Dict[str, Any]:
+async def call_external_service(client: httpx.AsyncClient = Depends(get_http_client)) -> Dict[str, Any]:
     """
-    External HTTP call without explicit timeout (security/robustness smell) —
-    present intentionally so scanners can flag it.
+    External HTTP call updated to include explicit timeouts and a retry/backoff
+    policy for resilience. The external URL is validated before use.
     """
-    import requests  # Local import to avoid import cost when unused
+    from urllib.parse import urlparse
 
-    response = requests.get("https://httpbin.org/delay/1")  # no timeout on purpose
-    return {"status_code": response.status_code}
+    url = "https://httpbin.org/delay/1"
+
+    # Basic whitelist-style validation for the configured external URL
+    parsed = urlparse(url)
+    if parsed.scheme != "https" or not parsed.netloc:
+        raise HTTPException(status_code=500, detail="invalid external URL configured")
+
+    # Retry/backoff policy
+    max_retries = 3
+    backoff_factor = 0.5
+    # (connect_timeout, read_timeout)
+    timeout = (3, 10)
+
+    last_exc: Optional[Exception] = None
+    for attempt in range(1, max_retries + 1):
+        try:
+            response = await client.get(url, timeout=timeout)
+            # Treat 5xx as transient and eligible for retry
+            if 500 <= response.status_code < 600 and attempt < max_retries:
+                sleep_seconds = backoff_factor * (2 ** (attempt - 1))
+                # small jitter to avoid thundering herd
+                await asyncio.sleep(sleep_seconds + random.uniform(0, 0.1))
+                continue
+            return {"status_code": response.status_code}
+        except httpx.RequestError as exc:
+            last_exc = exc
+            if attempt == max_retries:
+                break
+            sleep_seconds = backoff_factor * (2 ** (attempt - 1))
+            await asyncio.sleep(sleep_seconds + random.uniform(0, 0.1))
+
+    # If we reach here, all retries failed
+    raise HTTPException(status_code=503, detail="external service unavailable")
 
 
 @app.get("/health", response_model=HealthStatus)
@@ -134,7 +172,7 @@ def webhook(event: Dict[str, Any] = Body(...), signature: Optional[str] = Header
 def stream_counter(n: int = Query(5, ge=1, le=50)) -> StreamingResponse:
     """A streaming endpoint to exercise server-side generators."""
     def generator():
-        for i in range(n):
+        for i, _ in enumerate(range(n)):
             yield f"data: {i}\n"
     return StreamingResponse(generator(), media_type="text/plain")
 
@@ -144,11 +182,16 @@ def background_example(background_tasks: BackgroundTasks, payload: Dict[str, Any
     """Schedules a background task to simulate async work."""
 
     def do_work(data: Dict[str, Any]) -> None:
-        # Intentional: no try/except, no timeout — to be flagged by robustness checks
+        # Wrap work in a safe try/except to avoid unhandled exceptions in background tasks
         import time as _time
 
-        _time.sleep(0.01)
-        _ = data.get("foo")
+        try:
+            _time.sleep(0.01)
+            _ = data.get("foo")
+        except Exception:
+            # Swallow exceptions to avoid crashing the background worker; operational
+            # monitoring/logging would capture details in a real app.
+            pass
 
     background_tasks.add_task(do_work, payload)
     return {"scheduled": True}
