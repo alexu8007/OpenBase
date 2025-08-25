@@ -14,6 +14,7 @@ from collections import defaultdict
 import os
 import time
 from datetime import datetime
+import re
 
 from dotenv import load_dotenv
 
@@ -78,6 +79,19 @@ for mod in BUILT_IN_MODULES:
         langs = {"any"}
     BENCHMARK_LANGS[display_name] = {lang.lower() for lang in langs}
 
+
+def _list_immediate_repo_dirs(folder: Path):
+    """Return a list of immediate subdirectories for a folder, excluding hidden ones.
+
+    Any errors while listing are reported to the console and an empty list is returned.
+    """
+    try:
+        return [entry for entry in folder.iterdir() if entry.is_dir() and not entry.name.startswith('.')]
+    except (OSError, PermissionError) as exc:
+        console.print(f"[yellow]Could not list directory {folder}: {exc}[/yellow]")
+        return []
+
+
 def _analyze_single_codebase(path: Path, skip_set, benchmark_weights):
     """Run benchmarks on a single codebase directory and return raw score dict."""
     from benchmarks.language_utils import detect_languages
@@ -106,34 +120,51 @@ def _copy_tests_for_file(src_file: Path, dest_dir: Path) -> None:
     """Best-effort copy of co-located tests for a given file into dest_dir/tests.
 
     Looks for siblings matching test_*.py or *_test.py and a `tests` directory in the same tree level.
+    Errors encountered while reading/writing individual test files are reported but do not raise.
     """
+    tests_dir = dest_dir / "tests"
     try:
-        tests_dir = dest_dir / "tests"
         tests_dir.mkdir(parents=True, exist_ok=True)
+    except (OSError, PermissionError) as exc:
+        console.print(f"[yellow]Could not create tests directory {tests_dir}: {exc}[/yellow]")
+        return
 
-        parent = src_file.parent
-        # Copy sibling tests
-        for cand in parent.glob("test_*.py"):
+    parent = src_file.parent
+    # Copy sibling tests matching patterns
+    for cand in parent.glob("test_*.py"):
+        try:
             content = cand.read_text()
             (tests_dir / cand.name).write_text(content)
-        for cand in parent.glob("*_test.py"):
+        except (OSError, UnicodeDecodeError) as exc:
+            console.print(f"[yellow]Failed to copy test file {cand} -> {tests_dir}: {exc}[/yellow]")
+
+    for cand in parent.glob("*_test.py"):
+        try:
             content = cand.read_text()
             (tests_dir / cand.name).write_text(content)
+        except (OSError, UnicodeDecodeError) as exc:
+            console.print(f"[yellow]Failed to copy test file {cand} -> {tests_dir}: {exc}[/yellow]")
 
-        # If there's an immediate `tests` folder next to the file, copy its simple tests
-        neighbor_tests = parent / "tests"
-        if neighbor_tests.is_dir():
-            for cand in neighbor_tests.rglob("*.py"):
-                rel = cand.relative_to(neighbor_tests)
-                out_path = tests_dir / rel
-                out_path.parent.mkdir(parents=True, exist_ok=True)
-                try:
-                    out_path.write_text(cand.read_text())
-                except Exception:
-                    pass
-    except Exception:
-        # Non-fatal: absence of tests is acceptable; testability benchmark will be skipped by default
-        pass
+    # If there's an immediate `tests` folder next to the file, copy its simple tests
+    neighbor_tests = parent / "tests"
+    if neighbor_tests.is_dir():
+        for cand in neighbor_tests.rglob("*.py"):
+            rel = cand.relative_to(neighbor_tests)
+            out_path = tests_dir / rel
+            out_path.parent.mkdir(parents=True, exist_ok=True)
+            try:
+                out_path.write_text(cand.read_text())
+            except (OSError, UnicodeDecodeError) as exc:
+                console.print(f"[yellow]Failed to copy nested test file {cand} -> {out_path}: {exc}[/yellow]")
+
+
+def _is_valid_model_id(model: str) -> bool:
+    """Validate model id contains only expected characters (alphanumeric, dot, dash, underscore, slash)."""
+    if not isinstance(model, str) or not model.strip():
+        return False
+    # allow org/model or provider/name formats with limited set of chars
+    return re.match(r'^[A-Za-z0-9._\-/]+$', model) is not None
+
 
 @app.command()
 def compare_collections(
@@ -142,7 +173,10 @@ def compare_collections(
     skip: str = typer.Option('', "--skip", help="Comma-separated list of benchmark names to skip."),
     weights: str = typer.Option('{}', "--weights", help='JSON string to weight benchmarks.'),
 ):
-    """Compare two *collections* of repositories (every immediate subdirectory is treated as a repo)."""
+    """Compare two collections of repositories. Every immediate subdirectory is treated as a repository.
+
+    This command computes per-benchmark averages across all repos in each collection and displays a comparison table.
+    """
     if not folder1.is_dir() or not folder2.is_dir():
         console.print("[bold red]Error: Both folders must be valid directories.[/bold red]")
         raise typer.Exit(code=1)
@@ -153,26 +187,40 @@ def compare_collections(
         console.print("[bold red]Error: Invalid JSON format for weights.[/bold red]")
         raise typer.Exit(code=1)
 
+    # Ensure weights values are numeric
+    if isinstance(benchmark_weights, dict):
+        sanitized_weights = {}
+        for k, v in benchmark_weights.items():
+            try:
+                sanitized_weights[k] = float(v)
+            except (TypeError, ValueError):
+                console.print(f"[yellow]Warning: Invalid weight for '{k}' -> {v}. Defaulting to 1.0[/yellow]")
+                sanitized_weights[k] = 1.0
+        benchmark_weights = sanitized_weights
+    else:
+        console.print("[yellow]Warning: Weights should be a JSON object. Ignoring weights.[/yellow]")
+        benchmark_weights = {}
+
     # Normalize skip tokens to internal benchmark display names (e.g., git_health -> GitHealth)
     def _to_display(name: str) -> str:
         return name.replace('_', ' ').title().replace(' ', '')
     skip_set = {_to_display(s.strip()) for s in skip.split(',') if s.strip()}
 
     def _collect(folder, progress, task_id):
-        repo_dirs = [d for d in folder.iterdir() if d.is_dir() and not d.name.startswith('.')]
+        # List immediate repo directories and aggregate benchmark scores
+        repo_dirs = _list_immediate_repo_dirs(folder)
         aggregate: defaultdict[str, list] = defaultdict(list)
         for repo in repo_dirs:
-            # Update progress bar description
+            # Update progress bar description for clarity
             progress.update(task_id, description=f"{folder.name}/{repo.name}")
             raw_scores = _analyze_single_codebase(repo, skip_set, benchmark_weights)
-            for k, v in raw_scores.items():
-                aggregate[k].append(v)
+            for benchmark_name, score in raw_scores.items():
+                aggregate[benchmark_name].append(score)
             progress.advance(task_id)
-        avg_scores = {k: (sum(vs)/len(vs) if vs else 0.0) for k, vs in aggregate.items()}
+        avg_scores = {k: (sum(scores)/len(scores) if scores else 0.0) for k, scores in aggregate.items()}
         return avg_scores, len(repo_dirs)
 
-    from rich.progress import Progress, SpinnerColumn, TextColumn, BarColumn, TimeElapsedColumn
-    total_repos = sum(1 for _ in folder1.iterdir() if _.is_dir() and not _.name.startswith('.')) + sum(1 for _ in folder2.iterdir() if _.is_dir() and not _.name.startswith('.'))
+    total_repos = len(_list_immediate_repo_dirs(folder1)) + len(_list_immediate_repo_dirs(folder2))
     with Progress(
         SpinnerColumn(),
         TextColumn("[progress.description]{task.description}"),
@@ -190,8 +238,7 @@ def compare_collections(
     console.print(Align.center(f"Comparing collection [magenta]{folder1.name}[/magenta] ({n1} repos) vs [green]{folder2.name}[/green] ({n2} repos)"))
     console.print()
 
-    # Build table
-    from rich.table import Table
+    # Build comparison table
     table = Table(title="📊 Collection Quality Comparison", box=box.ROUNDED)
     table.add_column("Benchmark", style="cyan")
     table.add_column(f"🔵 {folder1.name}")
@@ -217,7 +264,10 @@ def compare_collections(
 def llm_battle(
     config: Path = typer.Option(Path("openbase.config.json"), "--config", help="Path to openbase.config.json"),
 ):
-    """Run LLM battle using configuration and files from benchmark folder (no flags needed)."""
+    """Run an LLM vs LLM refactor 'battle' using a config file that specifies models and a benchmark folder.
+
+    The command generates improved versions of files for each model, scores them with benchmarks, and reports a comparison.
+    """
     load_dotenv()
 
     repo_root = Path(__file__).resolve().parent
@@ -233,7 +283,13 @@ def llm_battle(
         raise typer.Exit(code=1)
 
     try:
-        cfg = json.loads(config_path.read_text())
+        cfg_text = config_path.read_text(encoding="utf-8")
+    except (OSError, PermissionError) as exc:
+        console.print(f"[bold red]Could not read config file {config_path}: {exc}[/bold red]")
+        raise typer.Exit(code=1)
+
+    try:
+        cfg = json.loads(cfg_text)
     except json.JSONDecodeError:
         console.print("[bold red]Invalid JSON in openbase.config.json[/bold red]")
         raise typer.Exit(code=1)
@@ -248,6 +304,12 @@ def llm_battle(
     if len(model_ids) != 2:
         console.print("[bold red]openbase.config.json must specify exactly 2 models under 'models'.[/bold red]")
         raise typer.Exit(code=1)
+
+    # Validate model ids for safety
+    for mid in model_ids:
+        if not _is_valid_model_id(mid):
+            console.print(f"[bold red]Invalid model id provided: '{mid}'. Allowed characters: letters, numbers, '.', '-', '_', '/'[/bold red]")
+            raise typer.Exit(code=1)
 
     bench_folder = cfg.get("benchmark_folder", "benchmarkv01")
     target_dir = (repo_root / bench_folder).resolve()
@@ -288,12 +350,28 @@ def llm_battle(
     else:
         benchmark_weights = {}
 
+    # Ensure weights values are numeric
+    if isinstance(benchmark_weights, dict):
+        sanitized_weights = {}
+        for k, v in benchmark_weights.items():
+            try:
+                sanitized_weights[k] = float(v)
+            except (TypeError, ValueError):
+                console.print(f"[yellow]Warning: Invalid weight for '{k}' -> {v}. Defaulting to 1.0[/yellow]")
+                sanitized_weights[k] = 1.0
+        benchmark_weights = sanitized_weights
+    else:
+        benchmark_weights = {}
+
     extra_instructions_path = cfg.get("extra_instructions")
     extra_text = None
     if extra_instructions_path:
         p = Path(extra_instructions_path)
         if p.exists():
-            extra_text = p.read_text(encoding="utf-8")
+            try:
+                extra_text = p.read_text(encoding="utf-8")
+            except (OSError, UnicodeDecodeError) as exc:
+                console.print(f"[yellow]Could not read extra_instructions file {p}: {exc}[/yellow]")
 
     copy_tests = bool(cfg.get("copy_tests", True))
 
@@ -323,7 +401,8 @@ def llm_battle(
         for file_path in file_paths:
             try:
                 original_code = file_path.read_text(encoding="utf-8", errors="ignore")
-            except Exception:
+            except (OSError, UnicodeDecodeError) as exc:
+                console.print(f"[yellow]Could not read file {file_path}: {exc}[/yellow]")
                 original_code = ""
             file_stem = file_path.stem
             for model in model_ids:
@@ -342,13 +421,24 @@ def llm_battle(
                     console.print(f"[yellow]Model '{model}' failed on {file_path.name}: {e}[/yellow]")
                     new_code = original_code
 
+                if new_code is None:
+                    console.print(f"[yellow]Model '{model}' returned no content for {file_path.name}; using original content.[/yellow]")
+                    new_code = original_code
+
                 # Write improved file (flatten nested names if needed)
                 out_file = out_repo / file_path.name
                 try:
                     out_file.write_text(new_code, encoding="utf-8")
-                except Exception:
-                    out_file = out_repo / file_path.name.replace(os.sep, "_")
-                    out_file.write_text(new_code, encoding="utf-8")
+                except (OSError, UnicodeEncodeError) as exc:
+                    # attempt safe fallback name and log the failure
+                    console.print(f"[yellow]Failed to write file {out_file}: {exc}. Attempting fallback filename.[/yellow]")
+                    try:
+                        out_file = out_repo / file_path.name.replace(os.sep, "_")
+                        out_file.write_text(new_code, encoding="utf-8")
+                    except (OSError, UnicodeEncodeError) as exc2:
+                        console.print(f"[red]Failed to write fallback file {out_file}: {exc2}. Skipping file.[/red]")
+                        # Skip to next file without raising
+                        continue
 
                 # Best-effort tests copy for python files
                 if copy_tests and file_path.suffix == ".py":
@@ -360,7 +450,7 @@ def llm_battle(
     console.print(Align.center("[bold blue]📊 Scoring generated code[/bold blue]"))
 
     def _collect(folder: Path):
-        repo_dirs = [d for d in folder.iterdir() if d.is_dir() and not d.name.startswith('.')]
+        repo_dirs = _list_immediate_repo_dirs(folder)
         aggregate = defaultdict(list)
         for repo in repo_dirs:
             raw_scores = _analyze_single_codebase(repo, skip_set, benchmark_weights)
@@ -413,6 +503,7 @@ def llm_battle(
     export_path.write_text(json.dumps(summary, indent=2))
     console.print(f"[green]Saved run to {export_path.parent}")
 
+
 def compare(
     codebase1: Path = typer.Option(..., "--codebase1", "-c1", help="Path to the first codebase."),
     codebase2: Path = typer.Option(..., "--codebase2", "-c2", help="Path to the second codebase."),
@@ -434,6 +525,20 @@ def compare(
     except json.JSONDecodeError:
         console.print("[bold red]Error: Invalid JSON format for weights.[/bold red]")
         raise typer.Exit(code=1)
+
+    # Ensure weights values are numeric
+    if isinstance(benchmark_weights, dict):
+        sanitized_weights = {}
+        for k, v in benchmark_weights.items():
+            try:
+                sanitized_weights[k] = float(v)
+            except (TypeError, ValueError):
+                console.print(f"[yellow]Warning: Invalid weight for '{k}' -> {v}. Defaulting to 1.0[/yellow]")
+                sanitized_weights[k] = 1.0
+        benchmark_weights = sanitized_weights
+    else:
+        console.print("[yellow]Warning: Weights should be a JSON object. Ignoring weights.[/yellow]")
+        benchmark_weights = {}
 
     skip_set = {s.strip().capitalize() for s in skip.split(',') if s.strip()}
 
@@ -659,7 +764,7 @@ def compare(
         console.print(Align.center(Text("📋 Detailed Analysis Report", style="bold white on blue")))
         console.print("="*60)
         
-        for name, _ in benchmarks_to_run:
+        for name, _func in benchmarks_to_run:
             console.print(f"\n[bold cyan]🔍 {name} Analysis[/bold cyan]")
             
             # Create a tree structure for better organization
@@ -697,4 +802,4 @@ def compare(
 
 
 if __name__ == "__main__":
-    app() 
+    app()
