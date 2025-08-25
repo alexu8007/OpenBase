@@ -16,7 +16,7 @@ google-generativeai>=0.3.1
 ruff
 mypy
 pytest-cov
-pyyaml
+pyyaml>=5.4
 lizard 
 python-dotenv
 litellm>=1.35.0
